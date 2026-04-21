@@ -810,10 +810,6 @@ include '../Categories/header.php';
         if (studentId) {
             showSection('payment_page');
             <?php if ($paymentStudent): ?>
-            if (!autoQrOpened) {
-                autoQrOpened = true;
-                setTimeout(() => showQR(<?php echo (int) $paymentStudent['id']; ?>, <?php echo (float) ($paymentStudent['total_fee'] ?? 0); ?>), 250);
-            }
             <?php endif; ?>
         }
     };
