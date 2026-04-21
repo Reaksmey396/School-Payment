@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>RUPP Payment</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+</head>
+
+<body>
+
+    <div class="relative min-h-screen flex items-center">
+        <!-- Background Image -->
+        <img class="absolute inset-0 w-full h-full object-cover -z-10"
+            src="https://i.pinimg.com/1200x/c9/51/38/c95138b92e77b013cef285a7ccdbc692.jpg" alt="">
+
+        <!-- Dark Overlay -->
+        <div class="absolute inset-0 bg-black/50 -z-10"></div>
+
+
+        <div class="max-w-7x mx-auto w-full mr-6 flex items-center gap-10 px-10">
+
+            <!-- LEFT CONTENT -->
+            <div class="w-1/2 text-white space-y-6">
+
+                <h1 id="typing" class="text-6xl font-bold leading-tight"></h1>
+
+                <p class="text-gray-200 text-lg">
+                    Secure and fast online payment system for students of
+                    Royal University of Phnom Penh.
+                    No more waiting in line.
+                </p>
+
+                <div class="flex gap-5">
+
+                    <button
+                        class="bg-blue-500 px-7 py-3 rounded-xl text-lg shadow-xl hover:scale-105 hover:bg-blue-600 transition">
+                        Pay Now
+                    </button>
+
+                    <button class="border border-white px-7 py-3 rounded-xl hover:bg-white hover:text-black transition">
+                        Learn More
+                    </button>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="bg-blue-700 hover:bg-blue-900 border-2 border-gray-400 rounded-xl p-4 py-3 text-center">
+                        <h1 class="font-bold text-2xl">123</h1>
+                        <p class="text-xs">Students</p>
+                    </div>
+                    <div class="bg-blue-700 hover:bg-blue-900 border-2 border-gray-400 rounded-xl p-4 py-3 text-center">
+                        <h1 class="font-bold text-2xl">456</h1>
+                        <p class="text-xs">Payments</p>
+                    </div>
+                    <div class="bg-blue-700 hover:bg-blue-900 border-2 border-gray-400 rounded-xl p-4 py-3 text-center">
+                        <h1 class="font-bold text-2xl">789</h1>
+                        <p class="text-xs">Courses</p>
+                    </div>
+                    <div class="bg-blue-700 hover:bg-blue-900 border-2 border-gray-400 rounded-xl p-4 py-3 text-center">
+                        <h1 class="font-bold text-2xl">321</h1>
+                        <p class="text-xs">Staff</p>
+                    </div>
+                </div>
+            </div>
+            <!-- RIGHT IMAGE -->
+            <div class="w-[58%] flex relative left-20 gap-3 -top-20 justify-center">
+
+                <img class="w-[300px] h-[260px] top-40 left-40 relative object-cover rounded-2xl shadow-2xl hover:scale-105 transition"
+                    src="https://i.pinimg.com/1200x/be/b5/cf/beb5cfc4013dd47ca07593a8d9bc4bb9.jpg" alt="">
+                <img class="w-[400px] relative -left-23 h-[260px] object-cover rounded-2xl shadow-2xl hover:scale-105 transition"
+                    src="https://i.pinimg.com/1200x/c6/aa/10/c6aa10ae08c3ba55ca007997016297a6.jpg" alt="">
+                <img class="w-[300px] h-[260px] relative top-40 -left-60 object-cover rounded-2xl shadow-2xl hover:scale-105 transition"
+                    src="https://i.pinimg.com/1200x/f4/d3/04/f4d304c4338f20a8f2024e0173961a2e.jpg" alt="">
+            </div>
+
+        </div>
+    </div>
+
+</body>
+<script>
+
+    document.addEventListener("DOMContentLoaded", function(){
+
+let text = "Pay Your RUPP School Fee Online";
+let i = 0;
+let isDeleting = false;
+
+function type() {
+
+    let element = document.getElementById("typing");
+
+    if (!isDeleting) {
+        element.innerHTML = text.substring(0, i);
+        i++;
+
+        if (i > text.length) {
+            isDeleting = true;
+            setTimeout(type, 1500);
+            return;
+        }
+
+    } else {
+
+        element.innerHTML = text.substring(0, i);
+        i--;
+
+        if (i < 0) {
+            isDeleting = false;
+            i = 0;
+        }
+    }
+
+    setTimeout(type, isDeleting ? 50 : 100);
+}
+
+type();
+
+});
+</script>
+
+</html>
+
+
+
+
+<!-- Code Paying -->
+<div id="paymentForm" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4">
+
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeModal()"></div>
+
+  <div class="relative bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-x-auto overflow-y-auto shadow-2xl animate-fadeUp">
+
+    <div class="flex items-center justify-between p-3 border-b border-gray-100">
+      <h2 class="text-3xl font-bold text-gray-800 uppercase tracking-tight">Student Payment</h2>
+      <button onclick="closeModal()" class="text-gray-400 hover:text-black transition-colors">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
+
+    <div class="p-6">
+      <form action="#" method="POST" class="space-y-4">
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-800 uppercase mb-1">Student ID</label>
+            <input type="text" placeholder="e.g. e20220001" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-800 uppercase mb-1">Gender</label>
+            <select class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+              <option>Male</option>
+              <option>Female</option>
+              <option>Other</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-gray-800 uppercase mb-1">Full Name</label>
+          <input type="text" placeholder="Enter your full name" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition">
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-gray-800 uppercase mb-1">Student Email</label>
+          <input type="email" placeholder="support@rupp.edu.kh" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition">
+        </div>
+
+        <div class="text-gray-800 text-xs bg-gray-300 mb-4 py-1 rounded-3 text-center fw-bold uppercase">
+          <p class="pt-3">Date : <span>20/10/2026</span></p>
+
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-gray-800 uppercase mb-3">Choose Bank</label>
+          <div class="grid grid-cols-3 gap-3">
+            <label class="cursor-pointer group">
+              <input type="radio" name="bank" value="bakong" class="hidden peer" required>
+              <div class="rounded-xl p-2 text-center peer-checked:border-blue-500 peer-checked:bg-blue-50 transition-all border-2 border-transparent">
+                <img class="w-[60px] m-auto rounded-4 h-[50px]" src="https://media.licdn.com/dms/image/v2/C5612AQFP1BrbSZ0jAg/article-cover_image-shrink_600_2000/article-cover_image-shrink_600_2000/0/1607185380032?e=2147483647&v=beta&t=h5Ibwns6vQhWdQou1PI2aaFWz5_Wy2vs_Atp3xA-pUw" alt="ABA">
+              </div>
+            </label>
+
+            <label class="cursor-pointer group">
+              <input type="radio" name="bank" value="aceleda" class="hidden peer">
+              <div class="rounded-xl p-2 text-center peer-checked:border-red-500 peer-checked:bg-red-50 transition-all border-2 border-transparent">
+                <img class="w-[100px] m-auto rounded-4 h-[50px]" src="https://play-lh.googleusercontent.com/weU8O2dHEQffcEyHeK11qTUMS-AQvlHW1IolQDM1XLuZN0ggl6Zr9kUwBqHwXr7i5T0=w600-h300-pc0xffffff-pd" alt="Bakong">
+              </div>
+            </label>
+
+            <label class="cursor-pointer group">
+              <input type="radio" name="bank" value="aba" class="hidden peer">
+              <div class=" rounded-xl p-2 text-center peer-checked:border-yellow-500 peer-checked:bg-yellow-50 transition-all border-2 border-transparent">
+                <img class="w-[60px]  m-auto pr-1 rounded-4 h-[50px]" src="https://play-lh.googleusercontent.com/WU6sZMD1UspzwqYnlACtmN60rckp8hoINSgsR21mKLJBbsHPwXtzwvOocpjC7FcO1g" alt="ACLEDA">
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <button type="submit" class="w-full mt-4 bg-blue-700 hover:bg-blue-600 text-white font-bold py-3 rounded-xl shadow-lg transition duration-300 active:scale-95">
+          Confirm & Pay
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+
+
