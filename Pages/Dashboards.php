@@ -16,10 +16,11 @@ if ($student_id > 0) {
             s.*,
             c.class_name,
             c.department,
+            f.id AS fee_id,
             f.total_fee
         FROM tbl_student s
         LEFT JOIN tbl_class c ON s.class_id = c.id
-        LEFT JOIN tbl_fee f ON c.department = f.department
+        LEFT JOIN tbl_fee f ON c.id = f.class_id
         WHERE s.id = ?
         LIMIT 1
     ");
@@ -379,7 +380,7 @@ include '../Categories/header.php';
                                     <td class='p-3 text-gray-500 text-sm'>" . date('d-M-Y', strtotime($row['created_at'])) . "</td>
                                     <td class='p-3'>
                                         <div class='flex gap-4 justify-center'>
-                                            <button onclick=\"viewClass(" . $row['id'] . ")\" class=' text-blue-600 hover:text-blue-800' title='Edit'>
+                                            <button onclick=\"viewClass(" . $row['id'] . ")\" class=' text-blue-600 hover:text-blue-800' title='View students in class'>
                                                 <i class='fa-solid fa-pen-to-square'></i>
                                             </button>
                                             <button class='text-red-600 hover:text-red-800' title='Delete'>
@@ -564,135 +565,136 @@ include '../Categories/header.php';
         <div class="w-full space-y-6 mx-3">
             <?php if ($paymentStudent): ?>
 
-            <!-- HEADER -->
-            <div class=" text-black p-6 rounded-2xl shadow-lg flex justify-between items-center">
-                <div>
-                    <h1 class="text-3xl font-bold">Student Payment</h1>
-                    <p class="text-sm text-gray-500 mt-2 opacity-90">Secure & fast payment system</p>
-                </div>
-                <div class="text-right">
-                    <i class="fa-solid fa-qrcode text-5xl mr-3"></i>
-                </div>
-            </div>
-
-            <!-- MAIN GRID -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-                <!-- LEFT: STUDENT PROFILE -->
-                <div class="bg-white rounded-2xl shadow p-6 col-span-2">
-
-                    <h2 class="text-xl font-bold mb-4 border-b pb-2"><i class="fa-solid fa-user-graduate mr-1 text-gray-600"></i> Student Info</h2>
-
-                    <div class="flex items-center gap-5 mb-6">
-                        <div class="w-16 h-16 bg-blue-500 text-white flex items-center justify-center rounded-full text-xl font-bold">
-                            <?php echo strtoupper(substr($paymentStudent['name'], 0, 1)); ?>
-                        </div>
-                        <div>
-                            <p class="text-xl font-semibold"><?php echo htmlspecialchars($paymentStudent['name']); ?></p>
-                            <p class="text-gray-500 text-sm"><?php echo htmlspecialchars($paymentStudent['email']); ?></p>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 gap-4 text-gray-700 text-sm">
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Student ID</p>
-                            <p class="font-semibold text-blue-600"><?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
-                        </div>
-
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Class</p>
-                            <p class="font-semibold text-amber-600"><?php echo htmlspecialchars($paymentStudent['class_name'] ?? 'N/A'); ?></p>
-                        </div>
-
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Department</p>
-                            <p class="font-semibold text-red-600"><?php echo htmlspecialchars($paymentStudent['department'] ?? 'N/A'); ?></p>
-                        </div>
-
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Payment Type</p>
-                            <p class="font-semibold text-green-600">School Fee</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- RIGHT: PAYMENT BOX -->
-                <div class="bg-white rounded-2xl shadow p-6 flex flex-col justify-between">
-
+                <!-- HEADER -->
+                <div class=" text-black p-6 rounded-2xl shadow-lg flex justify-between items-center">
                     <div>
-                        <h2 class="text-xl font-bold mb-4 border-b pb-2">💰 Payment</h2>
+                        <h1 class="text-3xl font-bold">Student Payment</h1>
+                        <p class="text-sm text-gray-500 mt-2 opacity-90">Secure & fast payment system</p>
+                    </div>
+                    <div class="text-right">
+                        <i class="fa-solid fa-qrcode text-5xl mr-3"></i>
+                    </div>
+                </div>
 
-                        <div class="bg-blue-50 p-4 rounded-xl text-center mb-4">
-                            <p class="text-gray-500 text-sm">Total Fee</p>
-                            <p class="text-4xl font-bold text-blue-600 mt-1">
-                                $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?>
-                            </p>
+                <!-- MAIN GRID -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                    <!-- LEFT: STUDENT PROFILE -->
+                    <div class="bg-white rounded-2xl shadow p-6 col-span-2">
+
+                        <h2 class="text-xl font-bold mb-4 border-b pb-2"><i class="fa-solid fa-user-graduate mr-1 text-gray-600"></i> Student Info</h2>
+
+                        <div class="flex items-center gap-5 mb-6">
+                            <div class="w-16 h-16 bg-blue-500 text-white flex items-center justify-center rounded-full text-xl font-bold">
+                                <?php echo strtoupper(substr($paymentStudent['name'], 0, 1)); ?>
+                            </div>
+                            <div>
+                                <p class="text-xl font-semibold"><?php echo htmlspecialchars($paymentStudent['name']); ?></p>
+                                <p class="text-gray-500 text-sm"><?php echo htmlspecialchars($paymentStudent['email']); ?></p>
+                            </div>
                         </div>
 
-                        <div class="text-sm text-gray-500 mb-4">
-                            ✔ Includes all semester fees<br>
-                            ✔ One-time payment
+                        <div class="grid grid-cols-2 gap-4 text-gray-700 text-sm">
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Student ID</p>
+                                <p class="font-semibold text-blue-600"><?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
+                            </div>
+
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Class</p>
+                                <p class="font-semibold text-amber-600"><?php echo htmlspecialchars($paymentStudent['class_name'] ?? 'N/A'); ?></p>
+                            </div>
+
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Department</p>
+                                <p class="font-semibold text-red-600"><?php echo htmlspecialchars($paymentStudent['department'] ?? 'N/A'); ?></p>
+                            </div>
+
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Payment Type</p>
+                                <p class="font-semibold text-green-600">School Fee</p>
+                            </div>
                         </div>
                     </div>
 
-                    <!-- BUTTONS -->
-                    <div class="space-y-3">
-                        <button onclick="showQR(<?php echo (int) $paymentStudent['id']; ?>, <?php echo (float) ($paymentStudent['total_fee'] ?? 0); ?>)"
-                            class="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-xl font-semibold shadow">
-                             Confirm Payment
-                        </button>
+                    <!-- RIGHT: PAYMENT BOX -->
+                    <div class="bg-white rounded-2xl shadow p-6 flex flex-col justify-between">
 
-                        <button onclick="showReceipt()"
-                            class="w-full bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-xl">
-                            🧾 Print Receipt
-                        </button>
+                        <div>
+                            <h2 class="text-xl font-bold mb-4 border-b pb-2">💰 Payment</h2>
+
+                            <div class="bg-blue-50 p-4 rounded-xl text-center mb-4">
+                                <p class="text-gray-500 text-sm">Total Fee</p>
+                                <p class="text-4xl font-bold text-blue-600 mt-1">
+                                    $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?>
+                                </p>
+                            </div>
+
+                            <div class="text-sm text-gray-500 mb-4">
+                                ✔ Includes all semester fees<br>
+                                ✔ One-time payment
+                            </div>
+                        </div>
+
+                        <!-- BUTTONS -->
+                        <div class="space-y-3">
+                            <button onclick="showQR(<?php echo (int) $paymentStudent['id']; ?>, <?php echo (float) ($paymentStudent['total_fee'] ?? 0); ?>)"
+                                class="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-xl font-semibold shadow">
+                                Confirm Payment
+                            </button>
+
+                            <button onclick="showReceipt()"
+                                class="w-full bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-xl">
+                                🧾 Print Receipt
+                            </button>
+                        </div>
+
                     </div>
 
                 </div>
 
-            </div>
+                <!-- QR MODAL -->
+                <div id="qrModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center">
+                    <div class="bg-white p-6 rounded-xl text-center w-[350px]">
 
-            <!-- QR MODAL -->
-            <div id="qrModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center">
-                <div class="bg-white p-6 rounded-xl text-center w-[350px]">
+                        <h2 class="text-xl font-bold mb-4">Scan QR to Pay</h2>
 
-                    <h2 class="text-xl font-bold mb-4">Scan QR to Pay</h2>
+                        <!-- QR -->
+                        <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[220px] h-[220px] object-contain" />
 
-                    <!-- QR -->
-                    <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[220px] h-[220px] object-contain" />
+                        <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
 
-                    <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
+                        <div class="mt-4 rounded-lg bg-blue-50 text-blue-700 px-4 py-3 text-sm">
+                            Waiting for payment confirmation...
+                        </div>
 
-                    <button id="confirmPaymentBtn" onclick="confirmPayment()"
-                        class="bg-green-600 text-white mt-4 px-4 py-2 rounded-lg w-full">
-                        I Have Paid
-                    </button>
-
-                    <button onclick="closeQR()"
-                        class="mt-2 text-red-500">
-                        Cancel
-                    </button>
+                        <button onclick="closeQRAuto()"
+                            class="mt-2 text-red-500">
+                            Cancel
+                        </button>
+                    </div>
                 </div>
-            </div>
 
-            <!-- RECEIPT -->
-            <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
-                <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
+                <!-- RECEIPT -->
+                <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
+                    <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
+                    <p>Payer Name: <span id="payerName">-</span></p>
+                    <p>Payer Account: <span id="payerAccount">-</span></p>
+                    <p>Name: <?php echo htmlspecialchars($paymentStudent['name']); ?></p>
+                    <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
+                    <p>Amount: $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></p>
+                    <p>Receipt Code: <span id="receiptCode">-</span></p>
+                    <p>Date: <span id="payDate"></span></p>
 
-                <p>Name: <?php echo htmlspecialchars($paymentStudent['name']); ?></p>
-                <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
-                <p>Amount: $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></p>
-                <p>Date: <span id="payDate"></span></p>
-
-                <div class="text-green-600 font-bold mt-4">
-                    ✔ Payment Successful
+                    <div class="text-green-600 font-bold mt-4">
+                        ✔ Payment Successful
+                    </div>
                 </div>
-            </div>
             <?php elseif ($student_id > 0): ?>
-            <div class="bg-white rounded-2xl shadow p-6">
-                <h2 class="text-xl font-bold mb-2">Student not found</h2>
-                <p class="text-gray-500">The selected student could not be loaded for payment.</p>
-            </div>
+                <div class="bg-white rounded-2xl shadow p-6">
+                    <h2 class="text-xl font-bold mb-2">Student not found</h2>
+                    <p class="text-gray-500">The selected student could not be loaded for payment.</p>
+                </div>
             <?php endif; ?>
 
         </div>
@@ -828,6 +830,17 @@ include '../Categories/header.php';
     let autoQrOpened = false;
     let qrReady = false;
     let qrRefreshInterval = null; // Timer for QR refresh
+    let paymentCheckInterval = null;
+    let currentReceipt = {
+        amount: 0,
+        method: 'Bakong QR',
+        billNo: '',
+        receiptCode: '',
+        paidAt: '',
+        bankName: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay'), ENT_QUOTES); ?>',
+        bankAccount: '<?php echo htmlspecialchars(trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt'), ENT_QUOTES); ?>',
+        bankCity: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH'), ENT_QUOTES); ?>'
+    };
 
     function buildQrPlaceholder(label) {
         const safeLabel = String(label || 'Loading').replace(/[<>&"]/g, '');
@@ -840,6 +853,17 @@ include '../Categories/header.php';
         `;
 
         return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+    }
+
+    function buildQrRequestUrl(studentId, amount) {
+        const params = new URLSearchParams({
+            student_id: String(studentId),
+            amount: String(amount),
+            qr_mode: "static",
+            _: String(Date.now())
+        });
+
+        return "../Components/generate_qr.php?" + params.toString();
     }
 
     function setConfirmButtonState(disabled, label) {
@@ -855,6 +879,34 @@ include '../Categories/header.php';
         confirmBtn.classList.toggle('cursor-not-allowed', disabled);
     }
 
+    function updateReceipt(details) {
+        const receipt = details || currentReceipt;
+
+        const amountEl = document.getElementById('receiptAmount');
+        const methodEl = document.getElementById('receiptMethod');
+        const bankNameEl = document.getElementById('receiptBankName');
+        const bankAccountEl = document.getElementById('receiptBankAccount');
+        const bankCityEl = document.getElementById('receiptBankCity');
+        const billNoEl = document.getElementById('receiptBillNo');
+        const receiptCodeEl = document.getElementById('receiptCode');
+        const payDateEl = document.getElementById('payDate');
+        const paidToEl = document.getElementById('receiptPaidTo');
+        const payerNameEl = document.getElementById('payerName');
+        const payerAccountEl = document.getElementById('payerAccount');
+
+        if (payerNameEl) payerNameEl.textContent = receipt.payerName || '-';
+        if (payerAccountEl) payerAccountEl.textContent = receipt.payerAccount || '-';
+        if (amountEl) amountEl.textContent = Number(receipt.amount || currentAmount || 0).toFixed(2);
+        if (methodEl) methodEl.textContent = receipt.method || 'Bakong QR';
+        if (bankNameEl) bankNameEl.textContent = receipt.bankName || '';
+        if (bankAccountEl) bankAccountEl.textContent = receipt.bankAccount || '';
+        if (bankCityEl) bankCityEl.textContent = receipt.bankCity || '';
+        if (billNoEl) billNoEl.textContent = receipt.billNo || '-';
+        if (receiptCodeEl) receiptCodeEl.textContent = receipt.receiptCode || '-';
+        if (payDateEl) payDateEl.textContent = receipt.paidAt || '';
+        if (paidToEl) paidToEl.textContent = receipt.bankName || '';
+    }
+
     // View class
     function viewClass(classId) {
         // Redirect with class_id
@@ -867,7 +919,7 @@ include '../Categories/header.php';
         const studentId = params.get('student_id');
 
         if (classId) {
-            showSection('class_button');
+            showSection('page_class');
         }
 
         if (studentId) {
@@ -996,40 +1048,16 @@ include '../Categories/header.php';
         myWindow.print();
     }
 
-
-    // Open Modal QR and Reciept
-
-//     function showQR(studentId, amount) {
-//     qrReady = false;
-
-//     document.getElementById('qrModal').classList.remove('hidden');
-
-//     const qrImg = document.getElementById('bakongQR');
-//     qrImg.src = buildQrPlaceholder("Loading...");
-
-//     fetch("../Components/generate_qr.php?student_id=" + studentId + "&amount=" + amount)
-//     .then(res => res.json())
-//     .then(data => {
-//         qrImg.src = data.qr_image;
-
-//         currentBillNo = data.bill_no;
-
-//         qrReady = true;
-
-//         // ✅ IMPORTANT: start checking payment
-//         checkPayment(currentBillNo, studentId, amount);
-//     });
-// }
-
     function closeQR() {
         document.getElementById('qrModal').classList.add('hidden');
         setConfirmButtonState(false, 'I Have Paid');
-        
+
         // Stop QR refresh when user cancels
         if (qrRefreshInterval) {
             clearInterval(qrRefreshInterval);
             qrRefreshInterval = null;
         }
+        if (paymentCheckInterval) { clearInterval(paymentCheckInterval); paymentCheckInterval = null; }
     }
 
     function confirmPayment() {
@@ -1054,7 +1082,7 @@ include '../Categories/header.php';
                     bill_no: String(currentBillNo || "")
                 }).toString()
             })
-            .then(async(res) => {
+            .then(async (res) => {
                 const contentType = res.headers.get("content-type") || "";
                 const raw = await res.text();
 
@@ -1084,7 +1112,7 @@ include '../Categories/header.php';
                 document.getElementById('receipt').classList.remove('hidden');
 
                 document.getElementById('payDate').innerText = data.paid_at || new Date().toLocaleString();
-                
+
                 // Stop QR refresh on successful payment
                 if (qrRefreshInterval) {
                     clearInterval(qrRefreshInterval);
@@ -1104,11 +1132,89 @@ include '../Categories/header.php';
         document.getElementById('receipt').classList.remove('hidden');
     }
 
+    function closeQRAuto() {
+    document.getElementById('qrModal').classList.add('hidden');
+document.getElementById('qrModal').style.display = 'none';
 
+    if (paymentCheckInterval) {
+        clearInterval(paymentCheckInterval);
+        paymentCheckInterval = null;
+    }
+}
+
+    function checkPaymentAuto(billNo, studentId, amount) {
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
+
+        paymentCheckInterval = setInterval(() => {
+            fetch(`../Components/check_payment.php?bill_no=${billNo}&md5=${encodeURIComponent(currentMd5 || billNo || '')}&hash=${encodeURIComponent(currentMd5 || billNo || '')}&student_id=${studentId}&amount=${amount}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (!data || data.status !== "PAID") {
+                        console.log("CHECK PAYMENT:", data);
+                        return;
+                    }
+                    currentReceipt.payerName = data.payer_name || '-';
+                    currentReceipt.payerAccount = data.payer_account || '-';
+
+                    if (paymentCheckInterval) {
+                        clearInterval(paymentCheckInterval);
+                        paymentCheckInterval = null;
+                    }
+
+                    const paidAt = new Date().toLocaleString();
+                    currentReceipt.amount = Number(amount || currentReceipt.amount || 0);
+                    currentReceipt.billNo = billNo || currentReceipt.billNo;
+                    currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                    currentReceipt.paidAt = paidAt;
+                    currentReceipt.method = data.method || currentReceipt.method || 'Bakong QR';
+                    currentReceipt.bankName = data.bank_name || currentReceipt.bankName;
+                    currentReceipt.bankAccount = data.bank_account || currentReceipt.bankAccount;
+                    currentReceipt.bankCity = data.bank_city || currentReceipt.bankCity;
+                    updateReceipt(currentReceipt);
+
+                    // STOP INTERVALS
+if (paymentCheckInterval) {
+    clearInterval(paymentCheckInterval);
+    paymentCheckInterval = null;
+}
+
+if (qrRefreshInterval) {
+    clearInterval(qrRefreshInterval);
+    qrRefreshInterval = null;
+}
+
+// HIDE QR MODAL (IMPORTANT FIX)
+const qrModal = document.getElementById('qrModal');
+qrModal.classList.add('hidden');
+qrModal.style.display = 'none';
+
+// SHOW RECEIPT
+const receipt = document.getElementById('receipt');
+receipt.classList.remove('hidden');
+receipt.style.display = 'block';
+
+document.getElementById('payDate').innerText = paidAt;
+
+                    alert(
+                        "Receipt: " + (currentReceipt.receiptCode || '-') + "\n" +
+                        "Amount: $" + Number(currentReceipt.amount || 0).toFixed(2) + "\n" +
+                        "Bank / Account: " + (currentReceipt.bankName || "") + "\n" +
+                        "Account No: " + (currentReceipt.bankAccount || "") + "\n" +
+                        "Time: " + paidAt
+                    );
+                })
+                .catch(err => {
+                    console.error("Payment check error:", err);
+                });
+        }, 5000);
+    }
 
     function checkPayment(billNo, studentId, amount) {
         let interval = setInterval(() => {
-            fetch(`../Components/check_payment.php?bill_no=${billNo}&student_id=${studentId}&amount=${amount}`)
+            fetch(`../Components/check_payment.php?bill_no=${billNo}&md5=${encodeURIComponent(currentMd5 || billNo || '')}&hash=${encodeURIComponent(currentMd5 || billNo || '')}&student_id=${studentId}&amount=${amount}`)
                 .then(res => res.text())
                 .then(data => {
                     if (data.trim() === "PAID") {
@@ -1119,7 +1225,7 @@ include '../Categories/header.php';
                         // បង្ហាញវិក្កយបត្រ
                         document.getElementById('receipt').classList.remove('hidden');
                         document.getElementById('payDate').innerText = new Date().toLocaleString();
-                        
+
                         // Stop QR refresh on successful payment
                         if (qrRefreshInterval) {
                             clearInterval(qrRefreshInterval);
@@ -1129,7 +1235,9 @@ include '../Categories/header.php';
                 });
         }, 5000); // ឆែករៀងរាល់ ៥ វិនាទីម្តង
     }
+
     function showQR(studentId, amount) {
+        document.getElementById('receipt').classList.add('hidden');
         currentStudent = studentId;
         currentAmount = amount;
         currentBillNo = null;
@@ -1148,8 +1256,10 @@ include '../Categories/header.php';
         qrImg.src = buildQrPlaceholder("Loading QR");
         setConfirmButtonState(true, 'Loading QR...');
 
-        fetch("../Components/generate_qr.php?student_id=" + encodeURIComponent(studentId) + "&amount=" + encodeURIComponent(amount))
-            .then(async(res) => {
+        fetch(buildQrRequestUrl(studentId, amount), {
+                cache: "no-store"
+            })
+            .then(async (res) => {
                 const raw = await res.text();
                 let data = null;
 
@@ -1168,12 +1278,18 @@ include '../Categories/header.php';
             .then(data => {
                 currentBillNo = data.bill_no || null;
                 currentMd5 = data.md5 || null;
+                currentReceipt.billNo = data.bill_no || currentReceipt.billNo;
+                currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                currentReceipt.amount = Number(data.amount || amount || currentReceipt.amount || 0);
+                currentReceipt.bankName = data.merchant_name || currentReceipt.bankName;
+                currentReceipt.bankAccount = data.merchant_account || currentReceipt.bankAccount;
+                currentReceipt.bankCity = data.merchant_city || currentReceipt.bankCity;
+                updateReceipt(currentReceipt);
                 qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
                 qrReady = true;
                 setConfirmButtonState(false, 'I Have Paid');
-                
-                // Start QR refresh timer (refresh every 4 minutes to prevent expiration)
-                startQrRefresh(studentId, amount);
+
+                checkPaymentAuto(currentBillNo, studentId, amount);
             })
             .catch(err => {
                 console.error("Error fetching QR:", err);
@@ -1189,30 +1305,32 @@ include '../Categories/header.php';
         if (qrRefreshInterval) {
             clearInterval(qrRefreshInterval);
         }
-        
+
         // Refresh QR every 4 minutes (240000 ms) to prevent expiration
         qrRefreshInterval = setInterval(() => {
             console.log("Refreshing QR code to prevent expiration...");
-            
+
             const qrImg = document.getElementById('bakongQR');
             qrImg.src = buildQrPlaceholder("Refreshing QR...");
             setConfirmButtonState(true, 'Refreshing QR...');
-            
-            fetch("../Components/generate_qr.php?student_id=" + encodeURIComponent(studentId) + "&amount=" + encodeURIComponent(amount))
-                .then(async(res) => {
+
+            fetch(buildQrRequestUrl(studentId, amount), {
+                    cache: "no-store"
+                })
+                .then(async (res) => {
                     const raw = await res.text();
                     let data = null;
-                    
+
                     try {
                         data = JSON.parse(raw);
                     } catch (error) {
                         throw new Error("The QR service returned an invalid response.");
                     }
-                    
+
                     if (!res.ok || !data.success) {
                         throw new Error(data.message || "Failed to refresh Bakong QR.");
                     }
-                    
+
                     return data;
                 })
                 .then(data => {

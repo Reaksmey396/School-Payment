@@ -1,499 +1,1323 @@
 <?php
 session_start();
-require '../Components/connection.php';
-
-if (!isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 2) {
+if (!isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 1) {
     header('location:../Components/Login.php');
     exit();
 }
-$email = $_SESSION['email'];
 
-// join account + student
-$query = "SELECT * 
-FROM tbl_account a
-JOIN tbl_student s ON a.email = s.email
-WHERE a.email = '$email'
-";
+include '../Components/connection.php';
 
-$result = mysqli_query($conn, $query);
-$data = mysqli_fetch_assoc($result);
+$receiptBankName = trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay');
+$receiptBankAccount = trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt');
+$receiptBankCity = trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH');
+
+$student_id = isset($_GET['student_id']) ? (int) $_GET['student_id'] : 0;
+$paymentStudent = null;
+
+if ($student_id > 0) {
+    $stmt = $conn->prepare("
+        SELECT
+            s.*,
+            c.class_name,
+            c.department,
+            f.total_fee
+        FROM tbl_student s
+        LEFT JOIN tbl_class c ON s.class_id = c.id
+        LEFT JOIN tbl_fee f ON c.department = f.department
+        WHERE s.id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param("i", $student_id);
+    $stmt->execute();
+    $paymentStudent = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+}
+
+if (isset($_POST['pay'])) {
+    header('Content-Type: application/json');
+
+    $student_id = isset($_POST['student_id']) ? (int) $_POST['student_id'] : 0;
+    $amount = isset($_POST['amount']) ? (float) $_POST['amount'] : 0;
+    $method = isset($_POST['method']) ? trim($_POST['method']) : 'Bakong QR';
+
+    if ($student_id <= 0 || $amount <= 0) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid payment data.'
+        ]);
+        exit();
+    }
+
+    $stmt = $conn->prepare("
+        INSERT INTO tbl_payment (student_id, amount, payment_date, method, bill_no)
+        VALUES (?, ?, CURDATE(), ?, ?)
+    ");
+
+    if (!$stmt) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Failed to prepare payment query.',
+            'detail' => mysqli_error($conn)
+        ]);
+        exit();
+    }
+
+    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : null;
+    $stmt->bind_param("idsss", $student_id, $amount, $method, $billNo);
+
+    if ($stmt->execute()) {
+        echo json_encode([
+            'success' => true,
+            'message' => 'Payment saved successfully.',
+            'paid_at' => date('Y-m-d H:i:s')
+        ]);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Failed to save payment.',
+            'detail' => $stmt->error
+        ]);
+    }
+
+    $stmt->close();
+    exit();
+}
 
 include '../Categories/header.php';
 ?>
 <style>
-    body {
-        font-family: 'Inter', sans-serif;
-    }
-
-    .tab-content {
-        display: none;
-    }
-
-    .tab-content.active {
-        display: block;
-        animation: fadeIn 0.3s ease;
-    }
-
-    .nav-item.active {
-        background-color: #f3f4f6;
-        color: #002B7F !important;
-        border-right: 3px solid #002B7F;
-        opacity: 1;
-    }
-
-    @keyframes fadeIn {
-        from { opacity: 0; }
-        to   { opacity: 1; }
+    html {
+        scrollbar-gutter: stable;
     }
 </style>
 
-<body class="flex h-screen overflow-hidden">
+<div class="flex min-h-screen bg-gray-100">
 
-    <aside class="w-64 bg-white border-r border-gray-100 flex-shrink-0 flex flex-col z-20">
-        <div class="flex mt-5 ml-4 items-center cursor-pointer gap-2">
-            <img src="https://upload.wikimedia.org/wikipedia/en/a/a2/RUPP_logo.PNG" width="40px" height="40px" alt="">
-            <span class="font-semibold fw-bold text-3xl uppercase text-red-500">RUPP<span class="text-blue-500">Pay</span></span>
+    <!-- Sidebar -->
+    <div class="w-[270px] bg-gray-50 text-blue-700 flex flex-col justify-between fixed h-full">
+
+        <div>
+            <div class="flex items-center gap-3 px-4 mb-8 mt-4">
+                <div class="flex items-center cursor-pointer gap-2">
+                    <img src="https://upload.wikimedia.org/wikipedia/en/a/a2/RUPP_logo.PNG" width="45px" height="45px" alt="">
+                    <span class="font-semibold fw-bold text-3xl uppercase text-red-500">RUPP<span class="text-blue-500">Pay</span></span>
+                </div>
+            </div>
+            <hr class="text-red-700 py-3">
+
+            <nav class="flex flex-col gap-2 px-4">
+
+                <button onclick="showSection('home_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg bg-gray-300 fw-medium">
+                    <i class="fa-solid fa-house"></i> Home
+                </button>
+
+                <button onclick="showSection('dashboard_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
+                    <i class="fa-solid fa-chart-simple"></i> Dashboard
+                </button>
+
+                <button onclick="showSection('student_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
+                    <i class="fa-solid fa-user-graduate"></i> Student
+                </button>
+
+                <button onclick="showSection('class_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
+                    <i class="fa-solid fa-building-columns"></i> Class
+                </button>
+
+                <button onclick="showSection('setting_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
+                    <i class="fa-solid fa-gear"></i> Settings
+                </button>
+
+            </nav>
         </div>
 
-        <nav class="flex-1 mt-5 space-y-5">
-            <button onclick="switchTab(event, 'dashboard')" class="nav-item active w-full flex items-center space-x-4 px-6 py-3.5 text-gray-500 opacity-70 hover:opacity-100 transition-all">
-                <i class="fa-solid fa-table-cells-large text-sm"></i>
-                <span class="text-sm font-semibold">Home</span>
-            </button>
-            <button onclick="switchTab(event, 'payment-history')" class="nav-item w-full flex items-center space-x-4 px-6 py-3.5 text-gray-500 opacity-70 hover:opacity-100 transition-all">
-                <i class="fa-solid fa-clock-rotate-left text-sm"></i>
-                <span class="text-sm font-semibold">History</span>
-            </button>
-            <button onclick="switchTab(event, 'fees-paid')" class="nav-item w-full flex items-center space-x-4 px-6 py-3.5 text-gray-500 opacity-70 hover:opacity-100 transition-all">
-                <i class="fa-solid fa-money-check-dollar text-sm"></i>
-                <span class="text-sm font-semibold">Payment</span>
-            </button>
-            <button onclick="switchTab(event, 'reports')" class="nav-item w-full flex items-center space-x-4 px-6 py-3.5 text-gray-500 opacity-70 hover:opacity-100 transition-all">
-                <i class="fa-solid fa-chart-simple text-sm"></i>
-                <span class="text-sm font-semibold">About Stude</span>
-            </button>
-            <button onclick="switchTab(event, 'reports')" class="nav-item w-full flex items-center space-x-4 px-6 py-3.5 text-gray-500 opacity-70 hover:opacity-100 transition-all">
-                <i class="fa-solid fa-chart-simple text-sm"></i>
-                <span class="text-sm font-semibold">Settings</span>
-            </button>
-        </nav>
-
-        <!-- Logout fixed at bottom of sidebar -->
-        <div class="p-4 border-t border-gray-100">
-            <?php
-            if (isset($_SESSION['is_admin'])) {
-                echo '
-                    <a href="../Components/logout.php" class="flex items-center justify-center text-gray-100 hover:bg-red-400 bg-red-600 px-4 py-3 rounded-lg font-medium cursor-pointer w-full">
-                        Logout <i class="fa-solid fa-arrow-right mx-1"></i>
-                    </a>
-                ';
-            } else {
-                echo '
-                    <a href="../Components/Login.php" class="block text-center text-gray-100 hover:bg-blue-500 bg-blue-600 px-4 py-2 rounded-lg font-medium cursor-pointer mb-2">Login</a>
-                    <a href="../Components/Register.php" class="block text-center text-gray-100 hover:bg-blue-500 bg-blue-600 px-4 py-2 rounded-lg font-medium cursor-pointer">Register</a>
-                ';
-            }
-            ?>
+        <!-- Logout -->
+        <div class="p-4">
+            <a href="../Components/logout.php"
+                class="block text-center bg-red-700 text-white hover:bg-red-500 py-2 rounded-lg">
+                Logout
+            </a>
         </div>
-    </aside>
 
-    <main class="flex-1 flex flex-col min-w-0">
-        <header class="h-16 bg-white border-b border-gray-50 flex items-center justify-between px-10 flex-shrink-0">
-            <h2 class="text-sm font-bold text-blue-500"><span class="text-red-500">RUPP</span>PAY Institutions</h2>
-            <div class="flex items-center space-x-6 text-gray-400 text-sm">
-                <i class="fa-solid fa-circle-question cursor-pointer hover:text-blue-600"></i>
-                <i class="fa-solid fa-bell cursor-pointer hover:text-blue-600"></i>
-                <i class="fa-solid fa-gear cursor-pointer hover:text-blue-600"></i>
-                <span class="h-4 w-px bg-gray-200 mx-2"></span>
-                <span class="text-xs font-bold text-gray-700 cursor-pointer">Support</span>
+    </div>
+
+    <!-- Main Content -->
+    <div class="ml-[270px] flex-1 p-8 min-w-0 overflow-hidden">
+
+        <div id="home_button" class="show_hide">
+            <h1 class="fw-bold text-2xl">Home Page</h1>
+            <div class="bg-white">
+                <p class="py-5">HI! This is Admin Dashboard....</p>
             </div>
-        </header>
+        </div>
+        <div id="dashboard_button" class="show_hide" style="display: none;">
+            <h1 class="fw-bold text-2xl">Dashboard Page</h1>
+            <div class="bg-white">
+                <p class="py-5">HI! This is Dashboard to show the graph or chart....</p>
+            </div>
+        </div>
 
-        <!-- Single scroll container — fixed the duplicate nested div -->
-        <div class="flex-1 overflow-y-auto p-10">
+        <div id="student_button" class="show_hide" style="display: none;">
 
-            <!-- ===================== DASHBOARD ===================== -->
-            <div id="dashboard" class="tab-content active">
-                <div class="flex">
-                    <div class="flex flex-col items-start justify-center mb-10">
-                        <div class="bg-gray-300 rounded-full p-1 h-30 w-30">
-                            <img src="https://i.pinimg.com/736x/64/c1/c3/64c1c3a7ee9b939305dbd30f92246631.jpg" class="rounded-full h-full w-full object-cover" alt="User Profile">
-                        </div>
-                        <div class="text-center ml-5 mt-2">
-                            <p class="text-xl font-bold text-gray-800"><?php echo $data['name']; ?></p>
-                            <p class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">ID: STU00002</p>
-                        </div>
-                    </div>
-                    <div class="ml-7 mt-8">
-                        <div>
-                            <h3 class="text-2xl md:text-4xl font-bold text-gray-900">Hi! <?php echo $data['name']; ?></h3>
-                            <p class="text-gray-400 text-xs mt-1">Manage your academic financial commitments and history.</p>
-                        </div>
-                        <div class="flex gap-2 mt-4">
-                            <button class="bg-pink-600 text-white px-5 py-2 rounded-lg">Pay Fee</button>
-                            <button onclick="window.print()" class="px-4 py-2 bg-gray-300 text-gray-600 text-[11px] font-bold rounded flex items-center">
-                                <i class="fa-solid fa-print mr-2"></i> Print Statement
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-10">
-                    <div class="xl:col-span-2 bg-[#0047AB] rounded-xl p-10 text-white relative shadow-lg">
-                        <p class="text-[10px] font-bold opacity-70 mb-2 uppercase tracking-widest">Total Fees Paid</p>
-                        <h4 class="text-5xl font-bold tracking-tight">$2,400.00</h4>
-                        <div class="mt-10 flex items-center text-[10px] opacity-70">
-                            <i class="fa-solid fa-circle-check mr-2 text-blue-300"></i> Updated 2 hours ago • Session 2023-2024
-                        </div>
-                        <div class="absolute top-1/2 -translate-y-1/2 right-10 bg-white/10 p-4 rounded-xl">
-                            <i class="fa-solid fa-wallet text-3xl"></i>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl p-10 border border-gray-100 shadow-sm">
-                        <div>
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Pending Balance</p>
-                            <h4 class="text-3xl font-bold text-gray-800">$600</h4>
-                        </div>
-                        <div class="space-y-3">
-                            <div class="w-full bg-gray-100 h-2 rounded-full overflow-hidden">
-                                <div class="bg-[#0047AB] h-full w-[85%]"></div>
-                            </div>
-                            <div class="flex justify-between text-[9px] font-bold text-gray-400">
-                                <span class="text-blue-600">85% COMPLETED</span>
-                                <span>$1,200 TOTAL</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="mb-10">
-                    <div class="flex justify-between items-center mt-5">
-                        <h5 class="font-bold text-gray-800">Recent Transactions</h5>
-                        <p class="text-[10px] text-gray-400 font-bold uppercase cursor-pointer">Filter by: <span class="text-gray-900 ml-1">All Transactions <i class="fa-solid fa-chevron-down ml-1"></i></span></p>
-                    </div>
-                    <div class="">
-                        <table class="table">
-                            <thead class="table-hover">
-                                <tr class="bg-dark">
-                                    <th>Transaction ID</th>
-                                    <th>Description</th>
-                                    <th>Date</th>
-                                    <th>Amount</th>
-                                    <th class="text-center">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td class="py-2 text-sm">TXN-882910</td>
-                                    <td class="py-2 text-sm">Semester 2 Tuition Fees</td>
-                                    <td class="py-2 text-sm">Oct 24, 2023</td>
-                                    <td class="py-2 text-sm">$500.00</td>
-                                    <td class="py-2 text-sm text-center"><span class="px-3 py-1 bg-blue-100 text-blue-600 font-bold rounded-full text-[9px]">PAID</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="py-2 text-sm">TXN-882894</td>
-                                    <td class="py-2 text-sm">Campus Housing Deposit</td>
-                                    <td class="py-2 text-sm">Sep 28, 2023</td>
-                                    <td class="py-2 text-sm">$400.00</td>
-                                    <td class="py-2 text-sm text-center"><span class="px-3 py-1 bg-indigo-100 text-indigo-600 font-bold rounded-full text-[9px]">PENDING</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="py-2 text-sm">TXN-882881</td>
-                                    <td class="py-2 text-sm">Laboratory Equipment Fee</td>
-                                    <td class="py-2 text-sm">Sep 15, 2023</td>
-                                    <td class="py-2 text-sm">$200.00</td>
-                                    <td class="py-2 text-sm text-center"><span class="px-3 py-1 bg-red-100 text-red-500 font-bold rounded-full text-[9px]">FAILED</span></td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div class="mt-8 text-center">
-                        <button class="text-[10px] font-black text-blue-700 uppercase tracking-widest hover:underline">View All Transactions <i class="fa-solid fa-arrow-right ml-2"></i></button>
-                    </div>
-                </div>
-
-                <div class="bg-gray-100/50 rounded-xl p-8 flex items-center justify-between">
-                    <div class="flex items-center space-x-6">
-                        <div class="bg-[#0047AB] p-4 rounded-lg text-white">
-                            <i class="fa-solid fa-graduation-cap text-2xl"></i>
-                        </div>
-                        <div>
-                            <h6 class="font-bold text-gray-800">Apply for Alumni Grant 2024</h6>
-                            <p class="text-xs text-gray-500 max-w-lg mt-1 leading-relaxed">Eligible students can receive up to 15% discount on the upcoming semester fees by applying before November 30th.</p>
-                        </div>
-                    </div>
-                    <button class="px-6 py-2.5 bg-gray-900 text-white text-xs font-bold rounded hover:bg-black transition">Learn More</button>
+            <div class="justify-between hidden md:flex items-center mb-4">
+                <h1 class="font-bold text-3xl md:text-4xl">Student List Overview</h1>
+                <div class="relative w-1/2">
+                    <i class="fa-solid fa-magnifying-glass absolute right-3 top-4 text-gray-400"></i>
+                    <input
+                        id="searchDesktop"
+                        type="text"
+                        placeholder="Search student id or name..."
+                        class="form-control w-full py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:outline-none">
                 </div>
             </div>
 
-            <!-- ===================== PAYMENT HISTORY ===================== -->
-            <div id="payment-history" class="tab-content">
-                <div class="mb-8">
-                    <h2 class="text-3xl font-bold text-gray-900">Payment History</h2>
-                    <p class="text-gray-400 text-sm mt-1">All your historical payment records from previous semesters.</p>
-                </div>
-                <div class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-                    <div class="flex justify-between items-center px-6 py-4 border-b border-gray-100">
-                        <h5 class="font-bold text-gray-800">All Transactions</h5>
-                        <span class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Session 2023–2024</span>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="table mb-0">
-                            <thead>
-                                <tr class="bg-dark">
-                                    <th>Transaction ID</th>
-                                    <th>Description</th>
-                                    <th>Date</th>
-                                    <th>Amount</th>
-                                    <th>Method</th>
-                                    <th class="text-center">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td class="text-sm">TXN-882910</td>
-                                    <td class="text-sm">Semester 2 Tuition Fees</td>
-                                    <td class="text-sm">Oct 24, 2023</td>
-                                    <td class="text-sm">$500.00</td>
-                                    <td class="text-sm">Bank Transfer</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-blue-100 text-blue-600 font-bold rounded-full text-[9px]">PAID</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">TXN-882894</td>
-                                    <td class="text-sm">Campus Housing Deposit</td>
-                                    <td class="text-sm">Sep 28, 2023</td>
-                                    <td class="text-sm">$400.00</td>
-                                    <td class="text-sm">ABA Pay</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-indigo-100 text-indigo-600 font-bold rounded-full text-[9px]">PENDING</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">TXN-882881</td>
-                                    <td class="text-sm">Laboratory Equipment Fee</td>
-                                    <td class="text-sm">Sep 15, 2023</td>
-                                    <td class="text-sm">$200.00</td>
-                                    <td class="text-sm">Cash</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-red-100 text-red-500 font-bold rounded-full text-[9px]">FAILED</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">TXN-881204</td>
-                                    <td class="text-sm">Semester 1 Tuition Fees</td>
-                                    <td class="text-sm">Mar 10, 2023</td>
-                                    <td class="text-sm">$600.00</td>
-                                    <td class="text-sm">Bank Transfer</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-blue-100 text-blue-600 font-bold rounded-full text-[9px]">PAID</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">TXN-880091</td>
-                                    <td class="text-sm">Library Annual Fee</td>
-                                    <td class="text-sm">Feb 5, 2023</td>
-                                    <td class="text-sm">$100.00</td>
-                                    <td class="text-sm">ABA Pay</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-blue-100 text-blue-600 font-bold rounded-full text-[9px]">PAID</span></td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
+            <div class="block md:hidden mb-4 mt-5">
+                <h1 class="font-bold text-3xl">Student List Overview</h1>
+                <p class="text-sm text-slate-500 mt-1 mb-3">Check student list to see student payments.</p>
+                <div class="relative">
+                    <i class="fa-solid fa-magnifying-glass absolute right-3 top-3 text-gray-400"></i>
+                    <input id="searchMobile" class="form-control w-full pr-10" type="text" placeholder="Search student id or name...">
                 </div>
             </div>
 
-            <!-- ===================== FEES PAID ===================== -->
-            <div id="fees-paid" class="tab-content">
-                <div class="mb-8">
-                    <h2 class="text-3xl font-bold text-gray-900">Fees Paid</h2>
-                    <p class="text-gray-400 text-sm mt-1">Breakdown of all charges including tuition, labs, and insurance.</p>
+            <div class="grid grid-cols-1 gap-6 mb-10">
+                <div class="bg-blue-200 gap-3 grid grid-cols-2 md:grid-cols-4 p-4 rounded-lg">
+                    <div class="flex flex-col">
+                        <select id="filterFaculty" class="p-2 border rounded bg-white">
+                            <option value="Faculty">Faculty</option>
+                            <option value="Engineering">Engineering</option>
+                            <option value="Science">Science</option>
+                            <option value="Education">Education</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col">
+                        <select id="filterDepartment" class="p-2 border rounded bg-white">
+                            <option value="Department">Department</option>
+                            <option value="ITE">ITE</option>
+                            <option value="CS">CS</option>
+                            <option value="IBM">IBM</option>
+                            <option value="IT">IT</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col">
+                        <select id="filterYear" class="p-2 border rounded bg-white">
+                            <option value="Year">Years</option>
+                            <option value="1">Year 1</option>
+                            <option value="2">Year 2</option>
+                            <option value="3">Year 3</option>
+                            <option value="4">Year 4</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col">
+                        <select id="filterClass" class="p-2 border rounded bg-white">
+                            <option value="Class">Class</option>
+                            <option value="A1">A1</option>
+                            <option value="A2">A2</option>
+                            <option value="A3">A3</option>
+                            <option value="A4">A4</option>
+                            <option value="M1">M1</option>
+                            <option value="M2">M2</option>
+                            <option value="M3">M3</option>
+                            <option value="M4">M4</option>
+                            <option value="E1">E1</option>
+                            <option value="E2">E2</option>
+                            <option value="E3">E3</option>
+                            <option value="E4">E4</option>
+                        </select>
+                    </div>
                 </div>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex justify-between items-start">
-                        <div>
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Tuition Fee</p>
-                            <h4 class="text-2xl font-bold text-gray-800">$1,200.00</h4>
-                            <p class="text-[10px] text-blue-600 font-bold mt-2">FULLY PAID</p>
-                        </div>
-                        <div class="bg-blue-100 p-3 rounded-lg text-blue-600">
-                            <i class="fa-solid fa-graduation-cap"></i>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex justify-between items-start">
-                        <div>
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Laboratory Fee</p>
-                            <h4 class="text-2xl font-bold text-gray-800">$200.00</h4>
-                            <p class="text-[10px] text-red-500 font-bold mt-2">FAILED</p>
-                        </div>
-                        <div class="bg-red-100 p-3 rounded-lg text-red-500">
-                            <i class="fa-solid fa-flask"></i>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex justify-between items-start">
-                        <div>
-                            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Housing Deposit</p>
-                            <h4 class="text-2xl font-bold text-gray-800">$400.00</h4>
-                            <p class="text-[10px] text-indigo-500 font-bold mt-2">PENDING</p>
-                        </div>
-                        <div class="bg-indigo-100 p-3 rounded-lg text-indigo-500">
-                            <i class="fa-solid fa-building"></i>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-                    <div class="px-6 py-4 border-b border-gray-100">
-                        <h5 class="font-bold text-gray-800">Fee Breakdown Detail</h5>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="table mb-0">
-                            <thead>
-                                <tr class="bg-dark">
-                                    <th>Fee Type</th>
-                                    <th>Due Date</th>
-                                    <th>Amount</th>
-                                    <th>Paid</th>
-                                    <th>Remaining</th>
-                                    <th class="text-center">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td class="text-sm">Semester 1 Tuition</td>
-                                    <td class="text-sm">Mar 1, 2023</td>
-                                    <td class="text-sm">$600.00</td>
-                                    <td class="text-sm">$600.00</td>
-                                    <td class="text-sm">$0.00</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-blue-100 text-blue-600 font-bold rounded-full text-[9px]">PAID</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">Semester 2 Tuition</td>
-                                    <td class="text-sm">Oct 1, 2023</td>
-                                    <td class="text-sm">$600.00</td>
-                                    <td class="text-sm">$600.00</td>
-                                    <td class="text-sm">$0.00</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-blue-100 text-blue-600 font-bold rounded-full text-[9px]">PAID</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">Laboratory Fee</td>
-                                    <td class="text-sm">Sep 1, 2023</td>
-                                    <td class="text-sm">$200.00</td>
-                                    <td class="text-sm">$0.00</td>
-                                    <td class="text-sm text-red-500 font-semibold">$200.00</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-red-100 text-red-500 font-bold rounded-full text-[9px]">FAILED</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="text-sm">Housing Deposit</td>
-                                    <td class="text-sm">Sep 28, 2023</td>
-                                    <td class="text-sm">$400.00</td>
-                                    <td class="text-sm">$0.00</td>
-                                    <td class="text-sm text-indigo-500 font-semibold">$400.00</td>
-                                    <td class="text-sm text-center"><span class="px-3 py-1 bg-indigo-100 text-indigo-600 font-bold rounded-full text-[9px]">PENDING</span></td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
+
+                <div class="">
+                    <button onclick="openModal()" class="btn btn-outline-primary float-end">+ Add Student</button>
                 </div>
             </div>
 
-            <!-- ===================== REPORTS ===================== -->
-            <div id="reports" class="tab-content">
-                <div class="mb-8">
-                    <h2 class="text-3xl font-bold text-gray-900">Reports</h2>
-                    <p class="text-gray-400 text-sm mt-1">Generate and download PDF summaries for tax or reimbursement purposes.</p>
+            <div class="bg-white p-4 rounded-xl shadow overflow-hidden">
+                <div class="w-full h-[500px] overflow-x-auto border border-gray-100 rounded-lg">
+                    <table id="studentTable" class="table table-hover w-max min-w-full">
+                        <thead class="table-primary text-center">
+                            <tr>
+                                <th class="px-4 py-2 whitespace-nowrap">ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Student ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Name</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Gender</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Email</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Faculty</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Department</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Year</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Class</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Created</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            $select = "
+                                SELECT 
+                                    s.id,
+                                    s.stu_id,
+                                    s.name,
+                                    s.gender,
+                                    s.email,
+                                    s.password,
+                                    s.created_at,
+                                    c.class_name,
+                                    c.faculty,
+                                    c.department,
+                                    c.year
+                                FROM tbl_student s
+                                LEFT JOIN tbl_class c ON s.class_id = c.id
+                            ";
+
+                            $ex = $conn->query($select);
+
+                            while ($row = mysqli_fetch_assoc($ex)) {
+                                echo "
+                                    <tr class='text-center border-b hover:bg-gray-50'>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['id']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['stu_id']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap font-medium'>{$row['name']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['gender']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['email']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['faculty']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['department']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>
+                                            <span class='px-2 py-1 bg-blue-100 text-blue-600 rounded text-xs'>
+                                                Year {$row['year']}
+                                            </span>
+                                        </td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['class_name']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['created_at']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>
+                                            <div class='flex gap-2 justify-center'>
+                                                <button onclick=\"viewStudent(" . $row['id'] . ")\" class='px-2 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-600 hover:text-white'>
+                                                    View
+                                                </button>
+                                                <button class='px-2 py-1 text-red-600 border border-red-600 rounded hover:bg-red-600 hover:text-white'>
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ";
+                            }
+                            ?>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex items-center justify-between">
-                        <div class="flex items-center space-x-4">
-                            <div class="bg-red-100 p-4 rounded-lg text-red-500">
-                                <i class="fa-solid fa-file-pdf text-2xl"></i>
-                            </div>
-                            <div>
-                                <h6 class="font-bold text-gray-800">Annual Fee Statement 2023</h6>
-                                <p class="text-xs text-gray-400 mt-1">Full breakdown of all fees paid this academic year.</p>
+            </div>
+        </div>
+
+        <div id="class_button" class="show_hide" style="display: none;">
+            <div class="flex justify-between items-center mb-5">
+                <h1 class="text-2xl font-bold">Class Management</h1>
+                <button onclick="openModalClass()" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg">
+                    <i class="fa-solid fa-plus mr-2"></i> Add Class
+                </button>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl shadow">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Class List</h2>
+                <div class="overflow-x-auto">
+                    <table class="table table-hover w-full">
+                        <thead class="table-primary text-center">
+                            <tr>
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Class Name</th>
+                                <th class="p-3">Faculty</th>
+                                <th class="p-3">Department</th>
+                                <th class="p-3">Year</th>
+                                <th class="p-3">Total Fee</th>
+                                <th class="p-3">Created At</th>
+                                <th class="p-3">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            // តភ្ជាប់ Database
+                            include '../Components/connection.php';
+                            $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : 0;
+
+                            // Select ទិន្នន័យពី tbl_class (តម្រៀបតាម ID ធំមកតូច)
+                            $select_class = "
+                                SELECT 
+                                    c.*, 
+                                    f.total_fee 
+                                FROM tbl_class c
+                                LEFT JOIN tbl_fee f ON c.department = f.department 
+                                ORDER BY c.id
+                            ";
+                            $ex_class = $conn->query($select_class);
+
+                            if ($ex_class->num_rows > 0) {
+                                while ($row = mysqli_fetch_assoc($ex_class)) {
+                                    // កំណត់ពណ៌តាមឆ្នាំ (Option)
+                                    $yearBadge = "";
+                                    switch ($row['year']) {
+                                        case 1:
+                                            $yearBadge = "bg-blue-100 text-blue-700";
+                                            break;
+                                        case 2:
+                                            $yearBadge = "bg-green-100 text-green-700";
+                                            break;
+                                        case 3:
+                                            $yearBadge = "bg-yellow-100 text-yellow-700";
+                                            break;
+                                        case 4:
+                                            $yearBadge = "bg-purple-100 text-purple-700";
+                                            break;
+                                        default:
+                                            $yearBadge = "bg-gray-100";
+                                    }
+
+                                    echo "<tr class='text-center align-middle border-b'>
+                                    <td class='p-3'>{$row['id']}</td>
+                                    <td class='p-3 font-bold text-blue-600'>{$row['class_name']}</td>
+                                    <td class='p-3'>{$row['faculty']}</td>
+                                    <td class='p-3'>{$row['department']}</td>
+                                    <td class='p-3'>
+                                        <span class='px-3 py-1 rounded-full text-xs font-semibold {$yearBadge}'>
+                                            Year {$row['year']}
+                                        </span>
+                                    </td>
+                                    <td class='p-3'>{$row['total_fee']}</td>
+                                    <td class='p-3 text-gray-500 text-sm'>" . date('d-M-Y', strtotime($row['created_at'])) . "</td>
+                                    <td class='p-3'>
+                                        <div class='flex gap-4 justify-center'>
+                                            <button onclick=\"viewClass(" . $row['id'] . ")\" class=' text-blue-600 hover:text-blue-800' title='View students in class'>
+                                                <i class='fa-solid fa-pen-to-square'></i>
+                                            </button>
+                                            <button class='text-red-600 hover:text-red-800' title='Delete'>
+                                                <i class='fa-solid fa-trash'></i>
+                                            </button>
+                                        </div>
+                                    </td>
+                                  </tr>";
+                                }
+                            } else {
+                                echo "<tr><td colspan='7' class='text-center p-5 text-gray-500'>No classes found.</td></tr>";
+                            }
+                            ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+
+
+        <div id="setting_button" class="show_hide" style="display: none;">
+            <h1 class="text-2xl font-bold">Settings</h1>
+            <div class="bg-white p-5 rounded-lg shadow mt-4">
+                <p>Please set your favorite in my UI Website....</p>
+            </div>
+        </div>
+        <?php
+        $select_class = "
+                SELECT COUNT(*) as total_students
+                FROM tbl_student 
+                WHERE class_id = '$class_id'
+            ";
+
+        $execute = $conn->query($select_class);
+        $datas = mysqli_fetch_assoc($execute);
+
+        $select_total_fee = "SELECT total_fee FROM tbl_fee WHERE class_id = '$class_id'";
+        $run = $conn->query($select_total_fee);
+        $datass = mysqli_fetch_assoc($run);
+        ?>
+
+        <div id="page_class" class="show_hide" style="display:none;">
+            <h1 class="text-4xl fw-bold">Student List</h1>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
+
+                <div class="relative overflow-hidden bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Total Students</p>
+                            <h3 class="text-3xl font-black text-slate-800 mt-1">
+                                <?php echo number_format($datas['total_students']); ?>
+                            </h3>
+                        </div>
+                        <div class="h-12 w-12 bg-blue-50 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-users text-blue-600 text-xl"></i>
+                        </div>
+                    </div>
+                    <div class="absolute bottom-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-cyan-400"></div>
+                </div>
+
+                <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Academic Status</p>
+                            <div class="flex items-center gap-2 mt-2">
+                                <span class="flex h-3 w-3 rounded-full bg-green-500 animate-pulse"></span>
+                                <h3 class="text-xl font-bold text-slate-800">Active Now</h3>
                             </div>
                         </div>
-                        <button onclick="window.print()" class="px-4 py-2 bg-gray-900 text-white text-xs font-bold rounded hover:bg-black transition flex items-center gap-2">
-                            <i class="fa-solid fa-download"></i> Download
+                        <div class="h-12 w-12 bg-green-50 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-graduation-cap text-green-600 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Total Fee in Class</p>
+                            <div class="flex items-center gap-2 mt-2">
+                                <h1 class="text-3xl font-black text-slate-800 mt-1">$<?php echo number_format($datas['total_students'] * $datass['total_fee']); ?></h1>
+                            </div>
+                        </div>
+                        <div class="h-12 w-12 bg-green-50 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-coins text-yellow-600 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+            <div class="grid mt-5 mb-10">
+                <div class="">
+                    <button onclick="openModal()" class="btn btn-outline-primary float-end">+ Add Student</button>
+                </div>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl shadow overflow-hidden">
+                <div class="w-full h-[500px] overflow-x-auto border border-gray-100 rounded-lg">
+                    <table id="studentTable" class="table table-hover w-max min-w-full">
+                        <thead class="table-primary text-center">
+                            <tr>
+                                <th class="px-4 py-2 whitespace-nowrap">ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Student ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Name</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Gender</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Email</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Faculty</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Department</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Year</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Class</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Created</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            include '../Components/connection.php';
+
+                            $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : 0;
+                            $student_id = isset($_GET['student_id']) ? $_GET['student_id'] : 0;
+
+                            $selects = "
+                                SELECT 
+                                    s.id,
+                                    s.stu_id,
+                                    s.name,
+                                    s.gender,
+                                    s.email,
+                                    s.created_at,
+                                    c.class_name,
+                                    c.faculty,
+                                    c.department,
+                                    c.year
+                                FROM tbl_student s
+                                LEFT JOIN tbl_class c ON s.class_id = c.id
+                                WHERE s.class_id = '$class_id'
+                            ";
+
+                            $exe = $conn->query($selects);
+
+                            while ($row = mysqli_fetch_assoc($exe)) {
+                                echo "
+                                    <tr class='text-center border-b hover:bg-gray-50'>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['id']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['stu_id']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap font-medium'>{$row['name']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['gender']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['email']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['faculty']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['department']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>
+                                            <span class='px-2 py-1 bg-blue-100 text-blue-600 rounded text-xs'>
+                                                Year {$row['year']}
+                                            </span>
+                                        </td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['class_name']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>{$row['created_at']}</td>
+                                        <td class='px-4 py-2 whitespace-nowrap'>
+                                            <div class='flex gap-2 justify-center'>
+                                                <button onclick=\"viewStudent(" . $row['id'] . ")\" class='px-2 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-600 hover:text-white'>
+                                                    View
+                                                </button>
+                                                <button class='px-2 py-1 text-red-600 border border-red-600 rounded hover:bg-red-600 hover:text-white'>
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ";
+                            }
+                            ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div id="payment_page" class="show_hide relative mt-1 right-12" style="display:none;">
+        <div class="w-full space-y-6 mx-3">
+            <?php if ($paymentStudent): ?>
+
+            <!-- HEADER -->
+            <div class=" text-black p-6 rounded-2xl shadow-lg flex justify-between items-center">
+                <div>
+                    <h1 class="text-3xl font-bold">Student Payment</h1>
+                    <p class="text-sm text-gray-500 mt-2 opacity-90">Secure & fast payment system</p>
+                </div>
+                <div class="text-right">
+                    <i class="fa-solid fa-qrcode text-5xl mr-3"></i>
+                </div>
+            </div>
+
+            <!-- MAIN GRID -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                <!-- LEFT: STUDENT PROFILE -->
+                <div class="bg-white rounded-2xl shadow p-6 col-span-2">
+
+                    <h2 class="text-xl font-bold mb-4 border-b pb-2"><i class="fa-solid fa-user-graduate mr-1 text-gray-600"></i> Student Info</h2>
+
+                    <div class="flex items-center gap-5 mb-6">
+                        <div class="w-16 h-16 bg-blue-500 text-white flex items-center justify-center rounded-full text-xl font-bold">
+                            <?php echo strtoupper(substr($paymentStudent['name'], 0, 1)); ?>
+                        </div>
+                        <div>
+                            <p class="text-xl font-semibold"><?php echo htmlspecialchars($paymentStudent['name']); ?></p>
+                            <p class="text-gray-500 text-sm"><?php echo htmlspecialchars($paymentStudent['email']); ?></p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4 text-gray-700 text-sm">
+                        <div class="bg-gray-50 p-3 rounded-lg">
+                            <p class="text-gray-500">Student ID</p>
+                            <p class="font-semibold text-blue-600"><?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
+                        </div>
+
+                        <div class="bg-gray-50 p-3 rounded-lg">
+                            <p class="text-gray-500">Class</p>
+                            <p class="font-semibold text-amber-600"><?php echo htmlspecialchars($paymentStudent['class_name'] ?? 'N/A'); ?></p>
+                        </div>
+
+                        <div class="bg-gray-50 p-3 rounded-lg">
+                            <p class="text-gray-500">Department</p>
+                            <p class="font-semibold text-red-600"><?php echo htmlspecialchars($paymentStudent['department'] ?? 'N/A'); ?></p>
+                        </div>
+
+                        <div class="bg-gray-50 p-3 rounded-lg">
+                            <p class="text-gray-500">Payment Type</p>
+                            <p class="font-semibold text-green-600">School Fee</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RIGHT: PAYMENT BOX -->
+                <div class="bg-white rounded-2xl shadow p-6 flex flex-col justify-between">
+
+                    <div>
+                        <h2 class="text-xl font-bold mb-4 border-b pb-2">💰 Payment</h2>
+
+                        <div class="bg-blue-50 p-4 rounded-xl text-center mb-4">
+                            <p class="text-gray-500 text-sm">Total Fee</p>
+                            <p class="text-4xl font-bold text-blue-600 mt-1">
+                                $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?>
+                            </p>
+                        </div>
+
+                        <div class="text-sm text-gray-500 mb-4">
+                            ✔ Includes all semester fees<br>
+                            ✔ One-time payment
+                        </div>
+                    </div>
+
+                    <!-- BUTTONS -->
+                    <div class="space-y-3">
+                        <button onclick="showQR(<?php echo (int) $paymentStudent['id']; ?>, <?php echo (float) ($paymentStudent['total_fee'] ?? 0); ?>)"
+                            class="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-xl font-semibold shadow">
+                             Confirm Payment
+                        </button>
+
+                        <button onclick="showReceipt()"
+                            class="w-full bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-xl">
+                            🧾 Print Receipt
                         </button>
                     </div>
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex items-center justify-between">
-                        <div class="flex items-center space-x-4">
-                            <div class="bg-blue-100 p-4 rounded-lg text-blue-600">
-                                <i class="fa-solid fa-file-invoice-dollar text-2xl"></i>
-                            </div>
-                            <div>
-                                <h6 class="font-bold text-gray-800">Semester 1 Receipt</h6>
-                                <p class="text-xs text-gray-400 mt-1">Official receipt for Semester 1 tuition payment.</p>
-                            </div>
-                        </div>
-                        <button onclick="window.print()" class="px-4 py-2 bg-gray-900 text-white text-xs font-bold rounded hover:bg-black transition flex items-center gap-2">
-                            <i class="fa-solid fa-download"></i> Download
-                        </button>
-                    </div>
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex items-center justify-between">
-                        <div class="flex items-center space-x-4">
-                            <div class="bg-blue-100 p-4 rounded-lg text-blue-600">
-                                <i class="fa-solid fa-file-invoice-dollar text-2xl"></i>
-                            </div>
-                            <div>
-                                <h6 class="font-bold text-gray-800">Semester 2 Receipt</h6>
-                                <p class="text-xs text-gray-400 mt-1">Official receipt for Semester 2 tuition payment.</p>
-                            </div>
-                        </div>
-                        <button onclick="window.print()" class="px-4 py-2 bg-gray-900 text-white text-xs font-bold rounded hover:bg-black transition flex items-center gap-2">
-                            <i class="fa-solid fa-download"></i> Download
-                        </button>
-                    </div>
-                    <div class="bg-white rounded-xl p-6 border border-gray-100 shadow-sm flex items-center justify-between">
-                        <div class="flex items-center space-x-4">
-                            <div class="bg-green-100 p-4 rounded-lg text-green-600">
-                                <i class="fa-solid fa-file-excel text-2xl"></i>
-                            </div>
-                            <div>
-                                <h6 class="font-bold text-gray-800">Full Transaction Export</h6>
-                                <p class="text-xs text-gray-400 mt-1">Export all transactions as a spreadsheet.</p>
-                            </div>
-                        </div>
-                        <button class="px-4 py-2 bg-gray-900 text-white text-xs font-bold rounded hover:bg-black transition flex items-center gap-2">
-                            <i class="fa-solid fa-download"></i> Export
-                        </button>
-                    </div>
+
                 </div>
-                <div class="bg-gray-100/50 rounded-xl p-8 flex items-center justify-between">
-                    <div class="flex items-center space-x-6">
-                        <div class="bg-[#0047AB] p-4 rounded-lg text-white">
-                            <i class="fa-solid fa-graduation-cap text-2xl"></i>
-                        </div>
-                        <div>
-                            <h6 class="font-bold text-gray-800">Apply for Alumni Grant 2024</h6>
-                            <p class="text-xs text-gray-500 max-w-lg mt-1 leading-relaxed">Eligible students can receive up to 15% discount on the upcoming semester fees by applying before November 30th.</p>
-                        </div>
-                    </div>
-                    <button class="px-6 py-2.5 bg-gray-900 text-white text-xs font-bold rounded hover:bg-black transition">Learn More</button>
+
+            </div>
+
+            <!-- QR MODAL -->
+            <div id="qrModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center">
+                <div class="bg-white p-6 rounded-xl text-center w-[350px]">
+
+                    <h2 class="text-xl font-bold mb-4">Scan QR to Pay</h2>
+
+                    <!-- QR -->
+                    <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[220px] h-[220px] object-contain" />
+
+                    <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
+
+                    <button id="confirmPaymentBtn" onclick="confirmPayment()"
+                        class="bg-green-600 text-white mt-4 px-4 py-2 rounded-lg w-full">
+                        I Have Paid
+                    </button>
+
+                    <button onclick="closeQR()"
+                        class="mt-2 text-red-500">
+                        Cancel
+                    </button>
                 </div>
             </div>
 
-        </div><!-- end single scroll container -->
-    </main>
+            <!-- RECEIPT -->
+            <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
+                <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
 
-    <script>
-        function switchTab(event, tabId) {
-            const tabs = document.querySelectorAll('.tab-content');
-            tabs.forEach(tab => {
-                tab.style.display = 'none';
-                tab.classList.remove('active');
-            });
+                <div class="text-left max-w-sm mx-auto space-y-2 text-sm text-gray-700">
+                    <p><strong>Student Name:</strong> <span id="receiptStudentName"><?php echo htmlspecialchars($paymentStudent['name'] ?? ''); ?></span></p>
+                    <p><strong>Student ID:</strong> <span id="receiptStudentId"><?php echo htmlspecialchars($paymentStudent['stu_id'] ?? ''); ?></span></p>
+                    <p><strong>Amount Paid:</strong> $<span id="receiptAmount"><?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></span></p>
+                    <p><strong>Payment Method:</strong> <span id="receiptMethod">Bakong QR</span></p>
+                    <p><strong>Bank / Account Name:</strong> <span id="receiptBankName"><?php echo htmlspecialchars($receiptBankName); ?></span></p>
+                    <p><strong>Bank Account:</strong> <span id="receiptBankAccount"><?php echo htmlspecialchars($receiptBankAccount); ?></span></p>
+                    <p><strong>Bank City:</strong> <span id="receiptBankCity"><?php echo htmlspecialchars($receiptBankCity); ?></span></p>
+                    <p><strong>Bill No:</strong> <span id="receiptBillNo">-</span></p>
+                    <p><strong>Date:</strong> <span id="payDate"></span></p>
+                </div>
 
-            const buttons = document.querySelectorAll('.nav-item');
-            buttons.forEach(btn => {
-                btn.classList.remove('active');
-            });
+                <div class="text-green-600 font-bold mt-4">
+                    Payment Successful
+                </div>
+            </div>
+            <?php elseif ($student_id > 0): ?>
+            <div class="bg-white rounded-2xl shadow p-6">
+                <h2 class="text-xl font-bold mb-2">Student not found</h2>
+                <p class="text-gray-500">The selected student could not be loaded for payment.</p>
+            </div>
+            <?php endif; ?>
 
-            const targetTab = document.getElementById(tabId);
-            if (targetTab) {
-                targetTab.style.display = 'block';
-                setTimeout(() => {
-                    targetTab.classList.add('active');
-                }, 10);
-            }
+        </div>
+    </div>
+</div>
 
-            event.currentTarget.classList.add('active');
+<!-- Modal add student -->
+<div id="studentModal"
+    class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center">
+
+    <div class="bg-white w-[500px] rounded-xl p-6 shadow-lg">
+
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold">Add Student</h2>
+            <i class="fa-solid fa-xmark cursor-pointer" onclick="closeModal()"></i>
+        </div>
+
+        <form action="../Components/insert_student.php" method="POST">
+
+            <input type="text" name="stu_id" placeholder="Student ID"
+                class="w-full mb-3 px-3 py-2 border rounded-lg" required>
+
+            <input type="text" name="name" placeholder="Name"
+                class="w-full mb-3 px-3 py-2 border rounded-lg" required>
+
+            <select name="gender" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                <option value="">Select Gender</option>
+                <option value="Male">Male</option>
+                <option value="Female">Female</option>
+            </select>
+
+            <input type="email" name="email" placeholder="Email"
+                class="w-full mb-3 px-3 py-2 border rounded-lg" required>
+
+            <input type="text" name="password" placeholder="Password"
+                class="w-full mb-3 px-3 py-2 border rounded-lg" required>
+
+            <input type="number" name="class_id" placeholder="Class ID"
+                class="w-full mb-3 px-3 py-2 border rounded-lg">
+
+            <div class="flex justify-end gap-2 mt-3">
+                <button type="button" onclick="closeModal()"
+                    class="bg-gray-400 text-white px-4 py-2 rounded-lg">
+                    Cancel
+                </button>
+
+                <button type="submit"
+                    class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg">
+                    Save
+                </button>
+            </div>
+
+        </form>
+
+    </div>
+</div>
+
+<!--Add Class Modal -->
+<div id="classModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center">
+
+    <div class="bg-white w-[500px] rounded-xl p-6 shadow-lg">
+
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold">Add Class</h2>
+            <i class="fa-solid fa-xmark cursor-pointer" onclick="closeModalClass()"></i>
+        </div>
+
+        <form action="../Components/insert_class.php" method="POST">
+            <div class="b-2">
+                <label for="" class="form-label fw-bold">Class Name</label>
+                <input type="text" name="class_name" placeholder="Class Name..."
+                    class="w-full mb-3 px-3 py-2 border rounded-lg">
+            </div>
+
+            <div class="mb-2">
+                <label for="" class="form-label fw-bold">Faculty</label>
+                <select name="faculty" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                    <option value="">Select Faculty</option>
+                    <option value="Engineering">Engineering</option>
+                    <option value="Science">Science</option>
+                    <option value="Education">Education</option>
+                </select>
+            </div>
+            <div class="mb-2">
+                <label for="" class="form-label fw-bold">Department</label>
+                <select name="department" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                    <option value="">Select Department</option>
+                    <option value="ITE">ITE</option>
+                    <option value="IT">IT</option>
+                    <option value="English">English</option>
+                    <option value="IBM">IBM</option>
+                    <option value="Math">Math</option>
+                </select>
+            </div>
+            <div class="mb-2">
+                <label for="" class="form-label fw-bold">Year</label>
+                <select name="year" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                    <option value="">Select Year</option>
+                    <option value="1">Year 1</option>
+                    <option value="2">Year 2</option>
+                    <option value="3">Year 3</option>
+                    <option value="4">Year 4</option>
+                </select>
+            </div>
+
+            <div class="mb-2">
+                <label for="" class="form-label fw-bold">Price Fee</label>
+                <input type="number" name="price" class="form-control" placeholder="Price fee..." required>
+            </div>
+
+            <div class="flex justify-end gap-2 mt-3">
+                <button type="button" onclick="closeModalClass()"
+                    class="bg-gray-400 text-white px-4 py-2 rounded-lg">
+                    Cancel
+                </button>
+
+                <button type="submit"
+                    class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg">
+                    Save
+                </button>
+            </div>
+
+        </form>
+
+    </div>
+</div>
+
+<script>
+    let currentStudent = null;
+    let currentAmount = null;
+    let currentBillNo = null;
+    let currentMd5 = null;
+    let autoQrOpened = false;
+    let qrReady = false;
+    let qrRefreshInterval = null; // Timer for QR refresh
+    let currentReceipt = {
+        method: 'Bakong QR',
+        amount: 0,
+        billNo: '',
+        bankName: '<?php echo htmlspecialchars($receiptBankName, ENT_QUOTES); ?>',
+        bankAccount: '<?php echo htmlspecialchars($receiptBankAccount, ENT_QUOTES); ?>',
+        bankCity: '<?php echo htmlspecialchars($receiptBankCity, ENT_QUOTES); ?>'
+    };
+
+    function buildQrPlaceholder(label) {
+        const safeLabel = String(label || 'Loading').replace(/[<>&"]/g, '');
+        const svg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220">
+                <rect width="220" height="220" fill="#f8fafc"/>
+                <rect x="10" y="10" width="200" height="200" rx="18" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+                <text x="110" y="110" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="18" fill="#475569">${safeLabel}</text>
+            </svg>
+        `;
+
+        return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+    }
+
+    function buildQrRequestUrl(studentId, amount) {
+        const params = new URLSearchParams({
+            student_id: String(studentId),
+            amount: String(amount),
+            qr_mode: "static",
+            _: String(Date.now())
+        });
+
+        return "../Components/generate_qr.php?" + params.toString();
+    }
+
+    function setConfirmButtonState(disabled, label) {
+        const confirmBtn = document.getElementById('confirmPaymentBtn');
+
+        if (!confirmBtn) {
+            return;
         }
-    </script>
-</body>
+
+        confirmBtn.disabled = disabled;
+        confirmBtn.textContent = label;
+        confirmBtn.classList.toggle('opacity-60', disabled);
+        confirmBtn.classList.toggle('cursor-not-allowed', disabled);
+    }
+
+    function updateReceipt(details) {
+        const receipt = details || currentReceipt;
+        const paymentStudent = <?php echo json_encode([
+            'name' => $paymentStudent['name'] ?? '',
+            'stu_id' => $paymentStudent['stu_id'] ?? ''
+        ]); ?>;
+
+        const nameEl = document.getElementById('receiptStudentName');
+        const idEl = document.getElementById('receiptStudentId');
+        const amountEl = document.getElementById('receiptAmount');
+        const methodEl = document.getElementById('receiptMethod');
+        const bankNameEl = document.getElementById('receiptBankName');
+        const bankAccountEl = document.getElementById('receiptBankAccount');
+        const bankCityEl = document.getElementById('receiptBankCity');
+        const billNoEl = document.getElementById('receiptBillNo');
+        const payDateEl = document.getElementById('payDate');
+
+        if (nameEl) nameEl.textContent = paymentStudent.name || '';
+        if (idEl) idEl.textContent = paymentStudent.stu_id || '';
+        if (amountEl) amountEl.textContent = Number(receipt.amount || currentAmount || 0).toFixed(2);
+        if (methodEl) methodEl.textContent = receipt.method || 'Bakong QR';
+        if (bankNameEl) bankNameEl.textContent = receipt.bankName || '';
+        if (bankAccountEl) bankAccountEl.textContent = receipt.bankAccount || '';
+        if (bankCityEl) bankCityEl.textContent = receipt.bankCity || '';
+        if (billNoEl) billNoEl.textContent = receipt.billNo || '-';
+        if (payDateEl) payDateEl.textContent = receipt.paidAt || new Date().toLocaleString();
+    }
+
+    // View class
+    function viewClass(classId) {
+        // Redirect with class_id
+        window.location.href = "?class_id=" + classId;
+    }
+    window.onload = function() {
+        const params = new URLSearchParams(window.location.search);
+
+        const classId = params.get('class_id');
+        const studentId = params.get('student_id');
+
+        if (classId) {
+            showSection('page_class');
+        }
+
+        if (studentId) {
+            showSection('payment_page');
+            <?php if ($paymentStudent): ?>
+            <?php endif; ?>
+        }
+    };
+    //View student
+    function viewStudent(id) {
+        window.location.href = "?student_id=" + id;
+    };
+
+
+    // student modal
+    function openModal() {
+        document.getElementById('studentModal').classList.remove('hidden');
+        document.getElementById('studentModal').classList.add('flex');
+    }
+
+    function closeModal() {
+        document.getElementById('studentModal').classList.add('hidden');
+    }
+
+    // class modal
+    function openModalClass() {
+        document.getElementById('classModal').classList.remove('hidden');
+        document.getElementById('classModal').classList.add('flex');
+    }
+
+    function closeModalClass() {
+        document.getElementById('classModal').classList.add('hidden');
+    }
+    // for change page with button in sidear
+    // Function សម្រាប់ប្តូរ Page និងដូរពណ៌ប៊ូតុង
+    function showSection(id, btnElement) {
+        // លាក់រាល់ Section ដែលមាន class 'show_hide'
+        var sections = document.querySelectorAll('.show_hide');
+        sections.forEach(section => {
+            section.style.display = 'none';
+        });
+
+        // បង្ហាញ Section ដែលយើងចង់បាន
+        const targetSection = document.getElementById(id);
+        if (targetSection) {
+            targetSection.style.display = 'block';
+        }
+
+        // ប្តូរពណ៌ប៊ូតុងនៅ Sidebar ឱ្យដឹងថា Page ណាមួយកំពុង Active
+        var buttons = document.querySelectorAll('nav button');
+        buttons.forEach(btn => {
+            btn.classList.remove('bg-gray-300');
+            btn.classList.add('hover:bg-gray-300');
+        });
+
+        if (btnElement) {
+            btnElement.classList.add('bg-gray-300');
+            btnElement.classList.remove('hover:bg-gray-300');
+        }
+    }
+
+    // Search filter (works for both desktop and mobile inputs)
+    document.addEventListener('DOMContentLoaded', function() {
+        const searchDesktop = document.getElementById('searchDesktop');
+        const searchMobile = document.getElementById('searchMobile');
+        const studentTable = document.getElementById('studentTable');
+
+        if (studentTable) {
+            const rows = studentTable.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+
+            const filterTable = (event) => {
+                const filter = event.target.value.toLowerCase();
+                for (let i = 0; i < rows.length; i++) {
+                    const stuId = rows[i].cells[1].textContent.toLowerCase();
+                    const name = rows[i].cells[2].textContent.toLowerCase();
+                    rows[i].style.display = (stuId.includes(filter) || name.includes(filter)) ? '' : 'none';
+                }
+            };
+
+            if (searchDesktop) searchDesktop.addEventListener('input', filterTable);
+            if (searchMobile) searchMobile.addEventListener('input', filterTable);
+        }
+
+        // Dropdown filters
+        const fFaculty = document.getElementById('filterFaculty');
+        const fDept = document.getElementById('filterDepartment');
+        const fYear = document.getElementById('filterYear');
+        const fClass = document.getElementById('filterClass');
+        const table = document.getElementById('studentTable');
+
+        function filterStudents() {
+            if (!table) return;
+            const rows = table.querySelectorAll('tbody tr');
+            const facultyVal = fFaculty.value.toLowerCase().trim();
+            const deptVal = fDept.value.toLowerCase().trim();
+            const yearVal = fYear.value.toLowerCase().trim();
+            const classVal = fClass.value.toLowerCase().trim();
+
+            rows.forEach(row => {
+                const rowFaculty = row.cells[5] ? row.cells[5].textContent.toLowerCase().trim() : '';
+                const rowDept = row.cells[6] ? row.cells[6].textContent.toLowerCase().trim() : '';
+                const rowYear = row.cells[7] ? row.cells[7].textContent.toLowerCase().trim() : '';
+                const rowClass = row.cells[8] ? row.cells[8].textContent.toLowerCase().trim() : '';
+
+                const matchFaculty = (facultyVal === 'faculty' || rowFaculty === facultyVal);
+                const matchDept = (deptVal === 'department' || rowDept === deptVal);
+                const matchYear = (yearVal === 'year' || yearVal === 'years' || rowYear === yearVal || rowYear.includes(yearVal));
+                const matchClass = (classVal === 'class' || rowClass === classVal || rowClass.includes(classVal));
+
+                row.style.display = (matchFaculty && matchDept && matchYear && matchClass) ? '' : 'none';
+            });
+        }
+
+        if (fFaculty) fFaculty.addEventListener('change', filterStudents);
+        if (fDept) fDept.addEventListener('change', filterStudents);
+        if (fYear) fYear.addEventListener('change', filterStudents);
+        if (fClass) fClass.addEventListener('change', filterStudents);
+    });
+    // Make button pay runs
+    // Print reciept
+    function printReceipt() {
+        var content = document.getElementById('receipt').innerHTML;
+        var myWindow = window.open('', '', 'width=800,height=600');
+        myWindow.document.write(content);
+        myWindow.document.close();
+        myWindow.print();
+    }
+
+
+    // Open Modal QR and Reciept
+
+//     function showQR(studentId, amount) {
+//     qrReady = false;
+
+//     document.getElementById('qrModal').classList.remove('hidden');
+
+//     const qrImg = document.getElementById('bakongQR');
+//     qrImg.src = buildQrPlaceholder("Loading...");
+
+//     fetch("../Components/generate_qr.php?student_id=" + studentId + "&amount=" + amount)
+//     .then(res => res.json())
+//     .then(data => {
+//         qrImg.src = data.qr_image;
+
+//         currentBillNo = data.bill_no;
+
+//         qrReady = true;
+
+//         // ✅ IMPORTANT: start checking payment
+//         checkPayment(currentBillNo, studentId, amount);
+//     });
+// }
+
+    function closeQR() {
+        document.getElementById('qrModal').classList.add('hidden');
+        setConfirmButtonState(false, 'I Have Paid');
+        
+        // Stop QR refresh when user cancels
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+            qrRefreshInterval = null;
+        }
+    }
+
+    function confirmPayment() {
+        if (!qrReady || !currentStudent || !currentAmount) {
+            alert("Please wait for the QR code to finish loading first.");
+            return;
+        }
+
+        setConfirmButtonState(true, 'Saving...');
+
+        fetch("", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                credentials: "same-origin",
+                body: new URLSearchParams({
+                    pay: "1",
+                    student_id: String(currentStudent),
+                    amount: String(currentAmount),
+                    method: "Bakong QR",
+                    bill_no: String(currentBillNo || "")
+                }).toString()
+            })
+            .then(async(res) => {
+                const contentType = res.headers.get("content-type") || "";
+                const raw = await res.text();
+
+                if (!contentType.includes("application/json")) {
+                    throw new Error("Your session may have expired. Please reload the page and try again.");
+                }
+
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("The server returned an invalid payment response.");
+                }
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || "Failed to save payment.");
+                }
+
+                return data;
+            })
+            .then(data => {
+                alert("Payment Successful!");
+
+                currentReceipt = {
+                    method: data.method || currentReceipt.method || 'Bakong QR',
+                    amount: Number(currentAmount || 0),
+                    billNo: currentBillNo || '',
+                    bankName: currentReceipt.bankName,
+                    bankAccount: currentReceipt.bankAccount,
+                    bankCity: currentReceipt.bankCity,
+                    paidAt: data.paid_at || new Date().toLocaleString()
+                };
+
+                closeQR();
+
+                updateReceipt(currentReceipt);
+                document.getElementById('receipt').classList.remove('hidden');
+                document.getElementById('payDate').innerText = currentReceipt.paidAt;
+                
+                // Stop QR refresh on successful payment
+                if (qrRefreshInterval) {
+                    clearInterval(qrRefreshInterval);
+                    qrRefreshInterval = null;
+                }
+            })
+            .catch(err => {
+                console.error("Payment save error:", err);
+                alert(err.message || "Payment could not be completed.");
+            })
+            .finally(() => {
+                setConfirmButtonState(false, 'I Have Paid');
+            });
+    }
+
+    function showReceipt() {
+        updateReceipt(currentReceipt);
+        document.getElementById('receipt').classList.remove('hidden');
+    }
+
+
+
+    function checkPayment(billNo, studentId, amount) {
+        let interval = setInterval(() => {
+            fetch(`../Components/check_payment.php?bill_no=${billNo}&student_id=${studentId}&amount=${amount}`)
+                .then(res => res.text())
+                .then(data => {
+                    if (data.trim() === "PAID") {
+                        clearInterval(interval); // បញ្ឈប់ការឆែក
+                        closeQR(); // បិទ Modal QR
+                        alert(`ការបង់ប្រាក់ចំនួន $${amount} បានជោគជ័យ!`);
+
+                        // បង្ហាញវិក្កយបត្រ
+                        currentReceipt.paidAt = new Date().toLocaleString();
+                        currentReceipt.amount = Number(amount || currentReceipt.amount || 0);
+                        currentReceipt.billNo = billNo || currentReceipt.billNo;
+                        updateReceipt(currentReceipt);
+                        document.getElementById('receipt').classList.remove('hidden');
+                        document.getElementById('payDate').innerText = currentReceipt.paidAt;
+                        
+                        // Stop QR refresh on successful payment
+                        if (qrRefreshInterval) {
+                            clearInterval(qrRefreshInterval);
+                            qrRefreshInterval = null;
+                        }
+                    }
+                });
+        }, 5000); // ឆែករៀងរាល់ ៥ វិនាទីម្តង
+    }
+    function showQR(studentId, amount) {
+        currentStudent = studentId;
+        currentAmount = amount;
+        currentBillNo = null;
+        currentMd5 = null;
+        qrReady = false;
+
+        // Clear any existing refresh timer
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+            qrRefreshInterval = null;
+        }
+
+        document.getElementById('qrModal').classList.remove('hidden');
+
+        const qrImg = document.getElementById('bakongQR');
+        qrImg.src = buildQrPlaceholder("Loading QR");
+        setConfirmButtonState(true, 'Loading QR...');
+
+        fetch(buildQrRequestUrl(studentId, amount), { cache: "no-store" })
+            .then(async(res) => {
+                const raw = await res.text();
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("The QR service returned an invalid response.");
+                }
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || "Failed to generate Bakong QR.");
+                }
+
+                return data;
+            })
+            .then(data => {
+                currentBillNo = data.bill_no || null;
+                currentMd5 = data.md5 || null;
+                currentReceipt = {
+                    method: 'Bakong QR',
+                    amount: Number(data.amount || amount || 0),
+                    billNo: data.bill_no || '',
+                    bankName: data.merchant_name || currentReceipt.bankName,
+                    bankAccount: data.merchant_account || currentReceipt.bankAccount,
+                    bankCity: data.merchant_city || currentReceipt.bankCity,
+                    paidAt: ''
+                };
+                updateReceipt(currentReceipt);
+                qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                qrReady = true;
+                setConfirmButtonState(false, 'I Have Paid');
+                
+                // Start QR refresh timer (refresh every 4 minutes to prevent expiration)
+                startQrRefresh(studentId, amount);
+            })
+            .catch(err => {
+                console.error("Error fetching QR:", err);
+                qrImg.src = buildQrPlaceholder("QR Failed");
+                qrReady = false;
+                setConfirmButtonState(true, 'QR Failed');
+                alert(err.message || "Unable to connect to Bakong server.");
+            });
+    }
+
+    function startQrRefresh(studentId, amount) {
+        // Clear any existing refresh timer
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+        }
+        
+        // Refresh QR every 4 minutes (240000 ms) to prevent expiration
+        qrRefreshInterval = setInterval(() => {
+            console.log("Refreshing QR code to prevent expiration...");
+            
+            const qrImg = document.getElementById('bakongQR');
+            qrImg.src = buildQrPlaceholder("Refreshing QR...");
+            setConfirmButtonState(true, 'Refreshing QR...');
+            
+            fetch(buildQrRequestUrl(studentId, amount), { cache: "no-store" })
+                .then(async(res) => {
+                    const raw = await res.text();
+                    let data = null;
+                    
+                    try {
+                        data = JSON.parse(raw);
+                    } catch (error) {
+                        throw new Error("The QR service returned an invalid response.");
+                    }
+                    
+                    if (!res.ok || !data.success) {
+                        throw new Error(data.message || "Failed to refresh Bakong QR.");
+                    }
+                    
+                    return data;
+                })
+                .then(data => {
+                    currentBillNo = data.bill_no || null;
+                    currentMd5 = data.md5 || null;
+                    currentReceipt.billNo = data.bill_no || currentReceipt.billNo;
+                    currentReceipt.amount = Number(data.amount || amount || currentReceipt.amount || 0);
+                    currentReceipt.bankName = data.merchant_name || currentReceipt.bankName;
+                    currentReceipt.bankAccount = data.merchant_account || currentReceipt.bankAccount;
+                    currentReceipt.bankCity = data.merchant_city || currentReceipt.bankCity;
+                    updateReceipt(currentReceipt);
+                    qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                    setConfirmButtonState(false, 'I Have Paid');
+                    console.log("QR code refreshed successfully");
+                })
+                .catch(err => {
+                    console.error("Error refreshing QR:", err);
+                    qrImg.src = buildQrPlaceholder("Refresh Failed");
+                    setConfirmButtonState(true, 'Refresh Failed');
+                });
+        }, 240000); // 4 minutes
+    }
+</script>
 
 <?php include '../Categories/footer.php'; ?>

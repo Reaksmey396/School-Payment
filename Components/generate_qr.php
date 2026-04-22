@@ -2,6 +2,8 @@
 error_reporting(0);
 ini_set('display_errors', 0);
 header('Content-Type: application/json');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
@@ -16,6 +18,13 @@ use KHQR\Models\IndividualInfo;
 
 $amount = isset($_GET['amount']) ? (float) $_GET['amount'] : 0;
 $student_id = isset($_GET['student_id']) ? (int) $_GET['student_id'] : 0;
+$qrMode = strtolower(trim($_GET['qr_mode'] ?? 'static'));
+$useDynamicAmount = in_array($qrMode, ['dynamic', 'amount'], true);
+$currencyInput = strtoupper(trim($_GET['currency'] ?? 'USD'));
+$currency = $currencyInput === 'KHR' ? KHQRData::CURRENCY_KHR : KHQRData::CURRENCY_USD;
+$bakongAccountId = trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt');
+$merchantName = trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay');
+$merchantCity = trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH');
 
 if ($student_id <= 0 || $amount <= 0) {
     echo json_encode([
@@ -26,14 +35,15 @@ if ($student_id <= 0 || $amount <= 0) {
 }
 
 $billNumber = 'STU-' . $student_id . '-' . time();
+$qrAmount = $useDynamicAmount ? $amount : 0.0;
 
 try {
     $individualInfo = new IndividualInfo(
-        bakongAccountID: 'khim_reaksmey@bkrt',
-        merchantName: 'RUPP Store',
-        merchantCity: 'PHNOM PENH',
-        currency: KHQRData::CURRENCY_KHR,
-        amount: round($amount, 2),
+        bakongAccountID: $bakongAccountId,
+        merchantName: $merchantName,
+        merchantCity: $merchantCity,
+        currency: $currency,
+        amount: round($qrAmount, 2),
         billNumber: $billNumber,
         storeLabel: 'RUPP',
         terminalLabel: 'POS-001'
@@ -69,7 +79,13 @@ try {
         'qr_string' => $qrString,
         'qr_image' => $result->getDataUri(),
         'bill_no' => $billNumber,
-        'md5' => $md5
+        'md5' => $md5,
+        'qr_mode' => $useDynamicAmount ? 'dynamic' : 'static',
+        'currency' => $currencyInput,
+        'merchant_name' => $merchantName,
+        'merchant_account' => $bakongAccountId,
+        'merchant_city' => $merchantCity,
+        'amount' => round($qrAmount, 2)
     ]);
 } catch (Throwable $error) {
     echo json_encode([

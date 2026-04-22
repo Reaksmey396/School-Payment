@@ -9,46 +9,67 @@ if (!isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 2) {
 
 $email = $_SESSION['email'];
 
-$select = "SELECT 
-    s.id,
-    s.stu_id,
-    s.name,
-    s.gender,
-    s.email,
-    s.created_at,
-    c.class_name,
-    c.department,
-    c.year,
-    f.total_fee
-FROM tbl_student s
-LEFT JOIN tbl_class c ON s.class_id = c.id
-LEFT JOIN tbl_fee f ON c.id = f.class_id
-WHERE s.email = '$email'
+$studentSql = "
+    SELECT 
+        s.id,
+        s.stu_id,
+        s.name,
+        s.gender,
+        s.email,
+        s.created_at,
+        c.class_name,
+        c.department,
+        c.year,
+        COALESCE(f.total_fee, 0) AS total_fee
+    FROM tbl_student s
+    LEFT JOIN tbl_class c ON s.class_id = c.id
+    LEFT JOIN tbl_fee f ON c.id = f.class_id
+    WHERE s.email = ?
+    LIMIT 1
 ";
 
-
-$ex = $conn->query($select);
-$data = mysqli_fetch_assoc($ex);
-
-
-include '../Components/connection.php';
+$stmt = $conn->prepare($studentSql);
+$stmt->bind_param("s", $email);
+$stmt->execute();
+$ex = $stmt->get_result();
+$data = $ex ? $ex->fetch_assoc() : null;
+$stmt->close();
 
 $student_id = isset($_GET['student_id']) ? (int) $_GET['student_id'] : 0;
-$paymentStudent = null;
+$paymentStudent = $data;
+$totalPaid = 0.0;
+$recentPayments = [];
 
-if ($student_id > 0) {
-    $stmt = $conn->prepare("SELECT 
-    s.id, s.stu_id, s.name, s.email, 
-    c.class_name, c.department, c.year, 
-    f.total_fee
-FROM tbl_student s
-LEFT JOIN tbl_class c ON s.class_id = c.id
-LEFT JOIN tbl_fee f ON c.id = f.class_id
-WHERE s.email = '$email' LIMIT 1");
-    $stmt->bind_param("i", $student_id);
-    $stmt->execute();
-    $paymentStudent = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
+if ($data && !empty($data['id'])) {
+    $currentStudentId = (int) $data['id'];
+
+    $paymentSummaryStmt = $conn->prepare("SELECT COALESCE(SUM(amount), 0) AS total_paid FROM tbl_payment WHERE student_id = ?");
+    if ($paymentSummaryStmt) {
+        $paymentSummaryStmt->bind_param("i", $currentStudentId);
+        $paymentSummaryStmt->execute();
+        $paymentSummaryResult = $paymentSummaryStmt->get_result();
+        if ($paymentSummaryResult && ($paymentSummaryRow = $paymentSummaryResult->fetch_assoc())) {
+            $totalPaid = (float) ($paymentSummaryRow['total_paid'] ?? 0);
+        }
+        $paymentSummaryStmt->close();
+    }
+
+    $recentPaymentsStmt = $conn->prepare("
+        SELECT payment_date, amount, method
+        FROM tbl_payment
+        WHERE student_id = ?
+        ORDER BY payment_date DESC, id DESC
+        LIMIT 5
+    ");
+    if ($recentPaymentsStmt) {
+        $recentPaymentsStmt->bind_param("i", $currentStudentId);
+        $recentPaymentsStmt->execute();
+        $recentPaymentsResult = $recentPaymentsStmt->get_result();
+        while ($recentPaymentsResult && ($row = $recentPaymentsResult->fetch_assoc())) {
+            $recentPayments[] = $row;
+        }
+        $recentPaymentsStmt->close();
+    }
 }
 
 if (isset($_POST['pay'])) {
@@ -171,12 +192,12 @@ include '../Categories/header.php';
                     <h3 class="font-semibold text-gray-700 mb-4">Student Info</h3>
 
                     <div class="space-y-2 text-sm text-gray-600">
-                        <p><strong>ID:</strong> <?php echo $data['stu_id'] ?></p>
-                        <p><strong>Name:</strong> <?php echo $data['name'] ?></p>
-                        <p><strong>Email:</strong> <?php echo $data['email'] ?></p>
-                        <p><strong>Department:</strong> <?php echo $data['department'] ?></p>
-                        <p><strong>Class:</strong> <?php echo 'Year ' . $data['year'] ?></p>
-                        <p><strong>Total Fee:</strong> <?php echo $data['total_fee'] ?>$</p>
+                        <p><strong>ID:</strong> <?php echo htmlspecialchars($data['stu_id'] ?? 'N/A'); ?></p>
+                        <p><strong>Name:</strong> <?php echo htmlspecialchars($data['name'] ?? 'N/A'); ?></p>
+                        <p><strong>Email:</strong> <?php echo htmlspecialchars($data['email'] ?? 'N/A'); ?></p>
+                        <p><strong>Department:</strong> <?php echo htmlspecialchars($data['department'] ?? 'N/A'); ?></p>
+                        <p><strong>Class:</strong> <?php echo 'Year ' . htmlspecialchars($data['year'] ?? 'N/A'); ?></p>
+                        <p><strong>Total Fee:</strong> <?php echo number_format((float) ($data['total_fee'] ?? 0), 2); ?>$</p>
                     </div>
                 </div>
 
@@ -185,76 +206,45 @@ include '../Categories/header.php';
 
                     <h3 class="font-semibold text-gray-700 mb-4">Payment Overview</h3>
 
+                    <?php
+                    $totalFee = (float) ($data['total_fee'] ?? 0);
+                    $remainingFee = max($totalFee - $totalPaid, 0);
+                    $progressPercent = $totalFee > 0 ? min(100, round(($totalPaid / $totalFee) * 100)) : 0;
+                    ?>
+
                     <!-- Numbers -->
                     <div class="flex justify-between mb-4">
                         <div>
                             <p class="text-sm text-gray-500">Total</p>
-                            <h2 class="text-xl font-bold">$500</h2>
+                            <h2 class="text-xl font-bold">$<?php echo number_format($totalFee, 2); ?></h2>
                         </div>
 
                         <div>
                             <p class="text-sm text-gray-500">Paid</p>
-                            <h2 class="text-xl font-bold text-green-500">$300</h2>
+                            <h2 class="text-xl font-bold text-green-500">$<?php echo number_format($totalPaid, 2); ?></h2>
                         </div>
 
                         <div>
                             <p class="text-sm text-gray-500">Remaining</p>
-                            <h2 class="text-xl font-bold text-red-500">$200</h2>
+                            <h2 class="text-xl font-bold text-red-500">$<?php echo number_format($remainingFee, 2); ?></h2>
                         </div>
                     </div>
 
                     <!-- Progress -->
                     <div class="w-full bg-gray-200 rounded-full h-3 mb-3">
-                        <div class="bg-blue-600 h-3 rounded-full" style="width: 60%"></div>
+                        <div class="bg-blue-600 h-3 rounded-full" style="width: <?php echo (int) $progressPercent; ?>%"></div>
                     </div>
 
-                    <p class="text-sm text-gray-500 mb-4">60% completed</p>
+                    <p class="text-sm text-gray-500 mb-4"><?php echo (int) $progressPercent; ?>% completed</p>
 
                     <!-- Button -->
-                    <button onclick="showQR(<?php echo (int) $data['id']; ?>, <?php echo (float) ($data['total_fee'] ?? 0); ?>)"
+                    <button onclick="showQR(<?php echo (int) ($data['id'] ?? 0); ?>, <?php echo (float) ($data['total_fee'] ?? 0); ?>)"
                         class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg shadow transition">
-                        Pay Now
+                        Pay with QR
                     </button>
 
                 </div>
 
-            </div>
-
-            <!-- Payment Modal -->
-            <div id="payModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
-                <div class="bg-white w-[400px] rounded-xl p-6 shadow-lg">
-                    <div class="flex justify-between items-center mb-4">
-                        <h2 class="text-xl font-bold">Pay with Bakong QR</h2>
-                        <i class="fa-solid fa-xmark cursor-pointer text-2xl" onclick="closePayModal()"></i>
-                    </div>
-
-                    <div id="qrLoading" class="text-center py-4">
-                        <p class="text-gray-500">Generating QR Code...</p>
-                    </div>
-
-                    <div id="qrContainer" class="hidden text-center">
-                        <img id="bakongQR" src="" alt="QR Code" class="w-[200px] h-[200px] mx-auto mb-4">
-                        <p class="text-sm text-gray-500 mb-2">Scan with Bakong App</p>
-                        <p class="font-bold text-lg mb-4">Amount: $<span id="payAmount"></span></p>
-
-                        <div class="flex gap-2">
-                            <button onclick="closePayModal()" class="flex-1 bg-gray-400 text-white px-4 py-2 rounded-lg">
-                                Cancel
-                            </button>
-                            <button onclick="confirmPayment()" class="flex-1 bg-green-600 text-white px-4 py-2 rounded-lg">
-                                Confirm
-                            </button>
-                        </div>
-                    </div>
-
-                    <div id="qrError" class="hidden text-center py-4">
-                        <p class="text-red-500">Failed to generate QR</p>
-                        <p id="errorMsg" class="text-sm text-gray-500"></p>
-                        <button onclick="closePayModal()" class="mt-2 bg-gray-400 text-white px-4 py-2 rounded-lg">
-                            Close
-                        </button>
-                    </div>
-                </div>
             </div>
 
             <!-- Payment History -->
@@ -271,17 +261,19 @@ include '../Categories/header.php';
                     </thead>
 
                     <tbody>
-                        <tr class="border-b">
-                            <td class="py-2">2026-04-01</td>
-                            <td>$100</td>
-                            <td class="text-green-500">Paid</td>
-                        </tr>
-
-                        <tr>
-                            <td class="py-2">2026-04-10</td>
-                            <td>$200</td>
-                            <td class="text-green-500">Paid</td>
-                        </tr>
+                        <?php if (!empty($recentPayments)): ?>
+                            <?php foreach ($recentPayments as $payment): ?>
+                                <tr class="border-b">
+                                    <td class="py-2"><?php echo htmlspecialchars($payment['payment_date'] ?? ''); ?></td>
+                                    <td>$<?php echo number_format((float) ($payment['amount'] ?? 0), 2); ?></td>
+                                    <td class="text-green-500"><?php echo htmlspecialchars($payment['method'] ?? 'Paid'); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr>
+                                <td class="py-2 text-gray-500" colspan="3">No payments found yet.</td>
+                            </tr>
+                        <?php endif; ?>
                     </tbody>
                 </table>
             </div>
@@ -313,9 +305,10 @@ include '../Categories/header.php';
             <!-- RECEIPT -->
             <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
                 <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
-
-                <p>Name: <?php echo htmlspecialchars($paymentStudent['name']); ?></p>
-                <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
+                <p>Payer Name: <span id="payerName">-</span></p>
+                <p>Payer Account: <span id="payerAccount">-</span></p>
+                <p>Name: <?php echo htmlspecialchars($paymentStudent['name'] ?? ''); ?></p>
+                <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id'] ?? ''); ?></p>
                 <p>Amount: $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></p>
                 <p>Date: <span id="payDate"></span></p>
 
@@ -323,7 +316,7 @@ include '../Categories/header.php';
                     ✔ Payment Successful
                 </div>
             </div>
-            <?php if ($student_id > 0): ?>
+            <?php if ($student_id > 0 && !$paymentStudent): ?>
                 <div class="bg-white rounded-2xl shadow p-6">
                     <h2 class="text-xl font-bold mb-2">Student not found</h2>
                     <p class="text-gray-500">The selected student could not be loaded for payment.</p>
@@ -460,6 +453,17 @@ $selects = "
         return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
     }
 
+    function buildQrRequestUrl(studentId, amount) {
+        const params = new URLSearchParams({
+            student_id: String(studentId),
+            amount: String(amount),
+            qr_mode: "static",
+            _: String(Date.now())
+        });
+
+        return "../Components/generate_qr.php?" + params.toString();
+    }
+
     function setConfirmButtonState(disabled, label) {
         const confirmBtn = document.getElementById('confirmPaymentBtn');
 
@@ -489,9 +493,7 @@ $selects = "
         }
 
         if (studentId) {
-            showSection('payment_page');
-            <?php if ($paymentStudent): ?>
-            <?php endif; ?>
+            showSection('home_button');
         }
     };
     // for change page with button in sidear
@@ -659,14 +661,16 @@ $selects = "
         qrImg.src = buildQrPlaceholder("Loading QR");
         setConfirmButtonState(true, 'Loading QR...');
 
-        fetch("../Components/generate_qr.php?student_id=" + encodeURIComponent(studentId) + "&amount=" + encodeURIComponent(amount))
+        fetch(buildQrRequestUrl(studentId, amount), {
+                cache: "no-store"
+            })
             .then(async (res) => {
                 const raw = await res.text();
                 let data = null;
 
                 try {
                     data = JSON.parse(raw);
-                    
+
                 } catch (error) {
                     throw new Error("The QR service returned an invalid response.");
                 }
@@ -678,15 +682,18 @@ $selects = "
                 return data;
             })
             .then(data => {
-                currentBillNo = data.bill_no || null;
-                currentMd5 = data.md5 || null;
-                qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
-                qrReady = true;
-                setConfirmButtonState(false, 'I Have Paid');
+    currentBillNo = data.bill_no || null;
+    currentMd5 = data.md5 || null;
+    qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+    qrReady = true;
+    setConfirmButtonState(false, 'I Have Paid');
 
-                // Start QR refresh timer (refresh every 4 minutes to prevent expiration)
-                startQrRefresh(studentId, amount);
-            })
+    //  ADD THIS LINE — start automatic payment detection
+    checkPayment(currentBillNo, studentId, amount);
+
+    // Start QR refresh timer
+    startQrRefresh(studentId, amount);
+})
             .catch(err => {
                 console.error("Error fetching QR:", err);
                 qrImg.src = buildQrPlaceholder("QR Failed");
@@ -710,7 +717,9 @@ $selects = "
             qrImg.src = buildQrPlaceholder("Refreshing QR...");
             setConfirmButtonState(true, 'Refreshing QR...');
 
-            fetch("../Components/generate_qr.php?student_id=" + encodeURIComponent(studentId) + "&amount=" + encodeURIComponent(amount))
+            fetch(buildQrRequestUrl(studentId, amount), {
+                    cache: "no-store"
+                })
                 .then(async (res) => {
                     const raw = await res.text();
                     let data = null;
