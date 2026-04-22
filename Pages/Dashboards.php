@@ -30,17 +30,51 @@ if ($student_id > 0) {
 }
 
 if (isset($_POST['pay'])) {
+    header('Content-Type: application/json');
 
     $student_id = isset($_POST['student_id']) ? (int) $_POST['student_id'] : 0;
     $amount = isset($_POST['amount']) ? (float) $_POST['amount'] : 0;
+    $method = isset($_POST['method']) ? trim($_POST['method']) : 'Bakong QR';
+
+    if ($student_id <= 0 || $amount <= 0) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid payment data.'
+        ]);
+        exit();
+    }
 
     $stmt = $conn->prepare("
-        INSERT INTO tbl_payment (student_id, amount, payment_date)
-        VALUES (?, ?, NOW())
+        INSERT INTO tbl_payment (student_id, amount, payment_date, method, bill_no)
+        VALUES (?, ?, CURDATE(), ?, ?)
     ");
-    $stmt->bind_param("id", $student_id, $amount);
 
-    echo $stmt->execute() ? "success" : "error";
+    if (!$stmt) {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Failed to prepare payment query.',
+            'detail' => mysqli_error($conn)
+        ]);
+        exit();
+    }
+
+    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : null;
+    $stmt->bind_param("idsss", $student_id, $amount, $method, $billNo);
+
+    if ($stmt->execute()) {
+        echo json_encode([
+            'success' => true,
+            'message' => 'Payment saved successfully.',
+            'paid_at' => date('Y-m-d H:i:s')
+        ]);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'message' => 'Failed to save payment.',
+            'detail' => $stmt->error
+        ]);
+    }
+
     $stmt->close();
     exit();
 }
@@ -625,11 +659,11 @@ include '../Categories/header.php';
                     <h2 class="text-xl font-bold mb-4">Scan QR to Pay</h2>
 
                     <!-- QR -->
-                    <img id="bakongQR" src="https://via.placeholder.com/200" class="mx-auto" />
+                    <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[220px] h-[220px] object-contain" />
 
                     <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
 
-                    <button onclick="confirmPayment()"
+                    <button id="confirmPaymentBtn" onclick="confirmPayment()"
                         class="bg-green-600 text-white mt-4 px-4 py-2 rounded-lg w-full">
                         I Have Paid
                     </button>
@@ -638,7 +672,6 @@ include '../Categories/header.php';
                         class="mt-2 text-red-500">
                         Cancel
                     </button>
-
                 </div>
             </div>
 
@@ -790,7 +823,37 @@ include '../Categories/header.php';
 <script>
     let currentStudent = null;
     let currentAmount = null;
+    let currentBillNo = null;
+    let currentMd5 = null;
     let autoQrOpened = false;
+    let qrReady = false;
+    let qrRefreshInterval = null; // Timer for QR refresh
+
+    function buildQrPlaceholder(label) {
+        const safeLabel = String(label || 'Loading').replace(/[<>&"]/g, '');
+        const svg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220">
+                <rect width="220" height="220" fill="#f8fafc"/>
+                <rect x="10" y="10" width="200" height="200" rx="18" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+                <text x="110" y="110" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="18" fill="#475569">${safeLabel}</text>
+            </svg>
+        `;
+
+        return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+    }
+
+    function setConfirmButtonState(disabled, label) {
+        const confirmBtn = document.getElementById('confirmPaymentBtn');
+
+        if (!confirmBtn) {
+            return;
+        }
+
+        confirmBtn.disabled = disabled;
+        confirmBtn.textContent = label;
+        confirmBtn.classList.toggle('opacity-60', disabled);
+        confirmBtn.classList.toggle('cursor-not-allowed', disabled);
+    }
 
     // View class
     function viewClass(classId) {
@@ -804,7 +867,7 @@ include '../Categories/header.php';
         const studentId = params.get('student_id');
 
         if (classId) {
-            showSection('page_class');
+            showSection('class_button');
         }
 
         if (studentId) {
@@ -933,61 +996,107 @@ include '../Categories/header.php';
         myWindow.print();
     }
 
+
     // Open Modal QR and Reciept
-    function showQR(studentId, amount) {
-    currentStudent = studentId;
-    currentAmount = amount;
 
-    document.getElementById('qrModal').classList.remove('hidden');
-    const qrImg = document.getElementById('bakongQR');
-    qrImg.src = "https://via.placeholder.com/200?text=Generating...";
+//     function showQR(studentId, amount) {
+//     qrReady = false;
 
-    fetch("../Components/generate_qr.php?student_id=" + studentId + "&amount=" + amount)
-        .then(res => res.json())
-        .then(data => {
-            // បន្ថែមការ Check data.responseCode == 0 ឱ្យច្បាស់លាស់
-            if (data && data.responseCode === 0 && data.data) {
-                const qrData = data.data.qrCode || data.data.qr || data.data.qrString;
-                
-                if (qrData) {
-                    // ប្រើ API សម្រាប់បង្កើតរូប QR ពី String ដែលទទួលបាន
-                    qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`;
-                    checkPayment(data.data.billNumber, studentId, amount);
-                }
-            } else {
-                // ប្រសិនបើ API error ឱ្យបង្ហាញរូបភាព Error ជំនួស icon បែក
-                qrImg.src = "https://via.placeholder.com/200?text=Bakong+Error";
-                console.error("Bakong Detail:", data);
-            }
-        })
-        .catch(err => {
-            qrImg.src = "https://via.placeholder.com/200?text=Conn+Error";
-        });
-}
+//     document.getElementById('qrModal').classList.remove('hidden');
+
+//     const qrImg = document.getElementById('bakongQR');
+//     qrImg.src = buildQrPlaceholder("Loading...");
+
+//     fetch("../Components/generate_qr.php?student_id=" + studentId + "&amount=" + amount)
+//     .then(res => res.json())
+//     .then(data => {
+//         qrImg.src = data.qr_image;
+
+//         currentBillNo = data.bill_no;
+
+//         qrReady = true;
+
+//         // ✅ IMPORTANT: start checking payment
+//         checkPayment(currentBillNo, studentId, amount);
+//     });
+// }
 
     function closeQR() {
         document.getElementById('qrModal').classList.add('hidden');
+        setConfirmButtonState(false, 'I Have Paid');
+        
+        // Stop QR refresh when user cancels
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+            qrRefreshInterval = null;
+        }
     }
 
     function confirmPayment() {
+        if (!qrReady || !currentStudent || !currentAmount) {
+            alert("Please wait for the QR code to finish loading first.");
+            return;
+        }
+
+        setConfirmButtonState(true, 'Saving...');
 
         fetch("", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/x-www-form-urlencoded"
                 },
-                body: "pay=1&student_id=" + currentStudent + "&amount=" + currentAmount
+                credentials: "same-origin",
+                body: new URLSearchParams({
+                    pay: "1",
+                    student_id: String(currentStudent),
+                    amount: String(currentAmount),
+                    method: "Bakong QR",
+                    bill_no: String(currentBillNo || "")
+                }).toString()
             })
-            .then(res => res.text())
-            .then(data => {
+            .then(async(res) => {
+                const contentType = res.headers.get("content-type") || "";
+                const raw = await res.text();
 
+                if (!contentType.includes("application/json")) {
+                    throw new Error("Your session may have expired. Please reload the page and try again.");
+                }
+
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("The server returned an invalid payment response.");
+                }
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || "Failed to save payment.");
+                }
+
+                return data;
+            })
+            .then(data => {
                 alert("Payment Successful!");
 
                 closeQR();
 
                 document.getElementById('receipt').classList.remove('hidden');
 
-                document.getElementById('payDate').innerText = new Date().toLocaleString();
+                document.getElementById('payDate').innerText = data.paid_at || new Date().toLocaleString();
+                
+                // Stop QR refresh on successful payment
+                if (qrRefreshInterval) {
+                    clearInterval(qrRefreshInterval);
+                    qrRefreshInterval = null;
+                }
+            })
+            .catch(err => {
+                console.error("Payment save error:", err);
+                alert(err.message || "Payment could not be completed.");
+            })
+            .finally(() => {
+                setConfirmButtonState(false, 'I Have Paid');
             });
     }
 
@@ -1010,9 +1119,115 @@ include '../Categories/header.php';
                         // បង្ហាញវិក្កយបត្រ
                         document.getElementById('receipt').classList.remove('hidden');
                         document.getElementById('payDate').innerText = new Date().toLocaleString();
+                        
+                        // Stop QR refresh on successful payment
+                        if (qrRefreshInterval) {
+                            clearInterval(qrRefreshInterval);
+                            qrRefreshInterval = null;
+                        }
                     }
                 });
         }, 5000); // ឆែករៀងរាល់ ៥ វិនាទីម្តង
+    }
+    function showQR(studentId, amount) {
+        currentStudent = studentId;
+        currentAmount = amount;
+        currentBillNo = null;
+        currentMd5 = null;
+        qrReady = false;
+
+        // Clear any existing refresh timer
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+            qrRefreshInterval = null;
+        }
+
+        document.getElementById('qrModal').classList.remove('hidden');
+
+        const qrImg = document.getElementById('bakongQR');
+        qrImg.src = buildQrPlaceholder("Loading QR");
+        setConfirmButtonState(true, 'Loading QR...');
+
+        fetch("../Components/generate_qr.php?student_id=" + encodeURIComponent(studentId) + "&amount=" + encodeURIComponent(amount))
+            .then(async(res) => {
+                const raw = await res.text();
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("The QR service returned an invalid response.");
+                }
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || "Failed to generate Bakong QR.");
+                }
+
+                return data;
+            })
+            .then(data => {
+                currentBillNo = data.bill_no || null;
+                currentMd5 = data.md5 || null;
+                qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                qrReady = true;
+                setConfirmButtonState(false, 'I Have Paid');
+                
+                // Start QR refresh timer (refresh every 4 minutes to prevent expiration)
+                startQrRefresh(studentId, amount);
+            })
+            .catch(err => {
+                console.error("Error fetching QR:", err);
+                qrImg.src = buildQrPlaceholder("QR Failed");
+                qrReady = false;
+                setConfirmButtonState(true, 'QR Failed');
+                alert(err.message || "Unable to connect to Bakong server.");
+            });
+    }
+
+    function startQrRefresh(studentId, amount) {
+        // Clear any existing refresh timer
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+        }
+        
+        // Refresh QR every 4 minutes (240000 ms) to prevent expiration
+        qrRefreshInterval = setInterval(() => {
+            console.log("Refreshing QR code to prevent expiration...");
+            
+            const qrImg = document.getElementById('bakongQR');
+            qrImg.src = buildQrPlaceholder("Refreshing QR...");
+            setConfirmButtonState(true, 'Refreshing QR...');
+            
+            fetch("../Components/generate_qr.php?student_id=" + encodeURIComponent(studentId) + "&amount=" + encodeURIComponent(amount))
+                .then(async(res) => {
+                    const raw = await res.text();
+                    let data = null;
+                    
+                    try {
+                        data = JSON.parse(raw);
+                    } catch (error) {
+                        throw new Error("The QR service returned an invalid response.");
+                    }
+                    
+                    if (!res.ok || !data.success) {
+                        throw new Error(data.message || "Failed to refresh Bakong QR.");
+                    }
+                    
+                    return data;
+                })
+                .then(data => {
+                    currentBillNo = data.bill_no || null;
+                    currentMd5 = data.md5 || null;
+                    qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                    setConfirmButtonState(false, 'I Have Paid');
+                    console.log("QR code refreshed successfully");
+                })
+                .catch(err => {
+                    console.error("Error refreshing QR:", err);
+                    qrImg.src = buildQrPlaceholder("Refresh Failed");
+                    setConfirmButtonState(true, 'Refresh Failed');
+                });
+        }, 240000); // 4 minutes
     }
 </script>
 

@@ -1,0 +1,6 @@
+{
+    "require": {
+        "khqr-gateway/bakong-khqr-php": "^1.0",
+        "endroid/qr-code": "^6.0"
+    }
+}

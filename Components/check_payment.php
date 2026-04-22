@@ -25,17 +25,20 @@ $result = json_decode($response, true);
 // ប្រសិនបើបង់ប្រាក់ជោគជ័យ (responseCode == 0)
 if (isset($result['responseCode']) && $result['responseCode'] == 0) {
 
-    // ប្រើ Prepared Statement ដើម្បីសុវត្ថិភាព
-    $stmt = $conn->prepare("INSERT INTO tbl_payment (student_id, amount, payment_date) VALUES (?, ?, NOW())");
-    $stmt->bind_param("id", $student_id, $amount);
-    
-    if ($stmt->execute()) {
-        echo "PAID";
-    } else {
-        echo "DB_ERROR";
+    $check = $conn->prepare("SELECT id FROM tbl_payment WHERE bill_no = ?");
+    $check->bind_param("s", $bill_no);
+    $check->execute();
+    $res = $check->get_result();
+
+    if ($res->num_rows == 0) {
+        $stmt = $conn->prepare("INSERT INTO tbl_payment (student_id, amount, payment_date, bill_no) VALUES (?, ?, NOW(), ?)");
+        $stmt->bind_param("ids", $student_id, $amount, $bill_no);
+        $stmt->execute();
+        $stmt->close();
     }
-    $stmt->close();
+    $check->close();
+    
+    echo "PAID";
 } else {
     echo "PENDING";
 }
-?>
