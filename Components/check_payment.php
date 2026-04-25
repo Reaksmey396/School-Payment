@@ -120,11 +120,57 @@ $bankName = trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay');
 $bankAccount = trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt');
 $bankCity = trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH');
 
+if ($bill_no === '') {
+    echo json_encode([
+        'status' => 'ERROR',
+        'message' => 'Missing bill number.'
+    ]);
+    exit();
+}
+
+$lockName = 'bakong_payment_' . preg_replace('/[^a-zA-Z0-9_]/', '_', $bill_no);
+$lockStmt = $conn->prepare("SELECT GET_LOCK(?, 10) AS lock_status");
+if (!$lockStmt) {
+    echo json_encode([
+        'status' => 'ERROR',
+        'message' => 'Failed to acquire payment lock.'
+    ]);
+    exit();
+}
+
+$lockStmt->bind_param("s", $lockName);
+$lockStmt->execute();
+$lockRes = $lockStmt->get_result();
+$lockRow = $lockRes ? $lockRes->fetch_assoc() : null;
+$lockStmt->close();
+
+if ((int) ($lockRow['lock_status'] ?? 0) !== 1) {
+    echo json_encode([
+        'status' => 'ERROR',
+        'message' => 'Payment is being processed. Please try again.'
+    ]);
+    exit();
+}
+
+$releasePaymentLock = function () use ($conn, $lockName): void {
+    $releaseStmt = $conn->prepare("SELECT RELEASE_LOCK(?) AS release_status");
+    if ($releaseStmt) {
+        $releaseStmt->bind_param("s", $lockName);
+        $releaseStmt->execute();
+        $releaseStmt->close();
+    }
+};
+
 $feeStmt = $conn->prepare("
     SELECT f.id AS fee_id
     FROM tbl_student s
     LEFT JOIN tbl_class c ON s.class_id = c.id
-    LEFT JOIN tbl_fee f ON c.id = f.class_id
+    LEFT JOIN (
+        SELECT faculty_id, department, MAX(id) AS fee_id
+        FROM tbl_fee
+        GROUP BY faculty_id, department
+    ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+    LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
     WHERE s.id = ?
     LIMIT 1
 ");
@@ -140,37 +186,41 @@ if ($feeStmt) {
 }
 
 $payment_id = 0;
-$paymentStmt = $conn->prepare("
-    SELECT id
-    FROM tbl_payment
-    WHERE student_id = ? AND fee_id = ? AND amount = ?
-    ORDER BY id DESC
-    LIMIT 1
-");
-
-if ($paymentStmt) {
-    $paymentStmt->bind_param("iid", $student_id, $fee_id, $amount);
-    $paymentStmt->execute();
-    $paymentRes = $paymentStmt->get_result();
-    if ($paymentRes && ($paymentRow = $paymentRes->fetch_assoc())) {
-        $payment_id = (int) ($paymentRow['id'] ?? 0);
+if ($bill_no !== '') {
+    $paymentStmt = $conn->prepare("SELECT id FROM tbl_payment WHERE bill_no = ? LIMIT 1");
+    if ($paymentStmt) {
+        $paymentStmt->bind_param("s", $bill_no);
+        $paymentStmt->execute();
+        $paymentRes = $paymentStmt->get_result();
+        if ($paymentRes && ($paymentRow = $paymentRes->fetch_assoc())) {
+            $payment_id = (int) ($paymentRow['id'] ?? 0);
+        }
+        $paymentStmt->close();
     }
-    $paymentStmt->close();
 }
 
 if ($payment_id <= 0) {
     $method = 'Bakong QR';
     $insertPayment = $conn->prepare("
-        INSERT INTO tbl_payment (student_id, fee_id, amount, payment_date, method)
-        VALUES (?, ?, ?, CURDATE(), ?)
+        INSERT INTO tbl_payment (student_id, fee_id, amount, payment_date, method, bill_no)
+        VALUES (?, ?, ?, CURDATE(), ?, ?)
     ");
 
     if ($insertPayment) {
-        $insertPayment->bind_param("iids", $student_id, $fee_id, $amount, $method);
+        $insertPayment->bind_param("iidss", $student_id, $fee_id, $amount, $method, $bill_no);
         $insertPayment->execute();
         $payment_id = (int) $insertPayment->insert_id;
         $insertPayment->close();
     }
+}
+
+if ($payment_id <= 0) {
+    echo json_encode([
+        'status' => 'ERROR',
+        'message' => 'Failed to save payment record.'
+    ]);
+    $releasePaymentLock();
+    exit();
 }
 
 $receipt_code = '';
@@ -195,6 +245,8 @@ if ($receipt_code === '') {
     }
 }
 
+$releasePaymentLock();
+
 echo json_encode([
     'status' => 'PAID',
     'message' => 'Payment confirmed.',
@@ -209,6 +261,8 @@ echo json_encode([
     // ✅ ADD HERE
     'payer_name' => $payerName,
     'payer_account' => $payerAccount,
+    'account_name' => $bankName,
+    'money_paid' => $amount,
 
     'bank_name' => $bankName,
     'bank_account' => $bankAccount,

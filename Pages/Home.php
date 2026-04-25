@@ -1,4 +1,7 @@
 <?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 include '../Components/Navbar.php';
 include '../Categories/header.php';
 ?>
@@ -15,7 +18,6 @@ include '../Categories/header.php';
         color: #1e293b;
         /* ពណ៌ Slate-800 ជួយឱ្យអក្សរមើលទៅទន់ភ្នែកជាងពណ៌ខ្មៅសុទ្ធ */
     }
-
     /* ៣. ការកំណត់ចំណងជើង (Headings) ឱ្យមើលទៅ "Premium" */
     h1,
     h2,
@@ -48,12 +50,14 @@ include '../Categories/header.php';
 <script>
     // បង្កើត Variable ក្នុង JS ដើម្បីស្គាល់ស្ថានភាព Login ពី PHP
     const isLoggedIn = <?php echo isset($_SESSION['is_admin']) ? 'true' : 'false'; ?>;
+    const userRole = <?php echo isset($_SESSION['is_admin']) ? (int) $_SESSION['is_admin'] : 0; ?>;
+    const paymentPageUrl = userRole === 2 ? '../Pages/Stu_dashoard.php' : '../Pages/Dashboards.php';
 </script>
 
 <div class="font-sans overflow-x-hidden bg-gray-100 text-gray-900">
 
     <!-- HERO SECTION -->
-    <section class="max-w-7xl mx-auto mt-15 px-8 py-20 flex items-center justify-between gap-12">
+    <section class="relative z-10 max-w-7xl mx-auto mt-15 px-8 py-20 flex items-center justify-between gap-12">
         <div class="max-w-lg">
             <h1 class="md:text-5xl text-3xl font-extrabold leading-tight text-gray-900 mb-5">
                 School Fees Payment <span class="text-brand">Made Simple.</span>
@@ -61,8 +65,9 @@ include '../Categories/header.php';
             <p class="text-gray-500 text-base leading-relaxed mb-8">
                 Pay school fees securely from the comfort of your home. Track history, download receipts, and never miss a deadline again with our automated reminders.
             </p>
-            <div class="flex items-center gap-4 mb-10">
-                <button id="payFeesBtn" class=" flex no-underline items-center gap-2 bg-brand hover:bg-brandDark text-white text-sm font-semibold px-6 py-3 rounded-md">
+    <div class="flex items-center gap-4 mb-10">
+                <button id="payFeesBtn" type="button" onclick="handlePayFeesClick(event)"
+                    class="relative z-[999] flex no-underline items-center gap-2 bg-brand text-white text-sm font-semibold px-6 py-3 rounded-md hover:bg-brandDark cursor-pointer pointer-events-auto">
                     Pay Fees Now
                     <span class="text-base">→</span>
                 </button>
@@ -206,74 +211,171 @@ include '../Categories/header.php';
         </div>
     </section>
 
-    <!-- Code Paying -->
-    <div id="payment" class="hidden fixed inset-0 z-[150] flex items-center justify-center p-4">
+    <!-- Parent lookup modal -->
+    <div id="paymentModal" class="hidden fixed inset-0 z-50 items-center justify-center bg-black/50">
+    
+    <!-- Modal Box -->
+    <div class="bg-white w-full max-w-sm rounded-xl shadow-lg">
 
-        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeModal()"></div>
-
-        <div class="relative bg-white rounded-2xl w-full max-w-lg shadow-2xl animate-fadeUp overflow-hidden">
-
-            <div class="flex mx-3 items-center justify-between p-3 border-b border-gray-100">
-                <h2 class="text-2xl md:text-4xl font-bold text-gray-800 tracking-tight">Payment Form</h2>
-                <button onclick="isLoggedIn ? toggleModal(true) : null" class="text-gray-400 hover:text-red-500 transition-colors">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                    </svg>
-                </button>
-            </div>
-
-            <!-- payment modal -->
-            <div id="paymentModal" class="hidden fixed inset-0 z-[150] flex items-center justify-center p-4">
-    <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="toggleModal(false)"></div>
-
-    <div class="relative bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
-        <div class="flex items-center justify-between p-4 border-b border-gray-100">
-            <h2 class="text-xl font-bold text-gray-800">Payment Form</h2>
-            <button onclick="toggleModal(false)" class="text-gray-400 hover:text-red-500 transition-colors">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                </svg>
+        <!-- Header -->
+        <div class="flex justify-between items-center border-b px-4 py-3">
+            <h2 class="text-3xl font-semibold text-gray-700">Student Information</h2>
+            <button onclick="toggleModal(false)" class="text-gray-400 hover:text-red-500">
+                ✕
             </button>
         </div>
 
-        <div class="p-6">
-            <form action="#" method="POST">
-                <div class="mb-4">
-                    <label class="block text-sm font-semibold mb-1">Student ID</label>
-                    <input class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-brand outline-none" type="text" name="stu_id" placeholder="Enter ID...">
+        <!-- Body -->
+        <div class="p-4">
+
+            <p class="text-sm text-gray-500 mb-4">
+                Enter student details to continue payment.
+            </p>
+
+            <form id="parentLookupForm" class="space-y-3">
+
+                <div>
+                    <label class="text-sm text-gray-600">Student ID</label>
+                    <input 
+                        id="lookupStuId" 
+                        name="stu_id" 
+                        type="text" 
+                        required
+                        placeholder="Enter ID"
+                        class="w-full border rounded-md px-3 py-2 mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 </div>
-                <div class="mb-4">
-                    <label class="block text-sm font-semibold mb-1">Full Name</label>
-                    <input class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-brand outline-none" type="text" name="name" placeholder="Enter Name...">
+
+                <div>
+                    <label class="text-sm text-gray-600">Student Name</label>
+                    <input 
+                        id="lookupName" 
+                        name="name" 
+                        type="text" 
+                        required
+                        placeholder="Enter name"
+                        class="w-full border rounded-md px-3 py-2 mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 </div>
-                <div class="grid grid-cols-2 gap-4 mb-4">
-                    <div>
-                        <label class="block text-sm font-semibold mb-1">Gender</label>
-                        <select name="gender" class="w-full px-4 py-2 border rounded-lg outline-none">
-                            <option value="male">Male</option>
-                            <option value="female">Female</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-semibold mb-1">Faculty</label>
-                        <select name="faculty" class="w-full px-4 py-2 border rounded-lg outline-none">
-                            <option value="Engineering">Engineering</option>
-                            <option value="Science">Science</option>
-                            <option value="Education">Education</option>
-                        </select>
-                    </div>
+
+                <div>
+                    <label class="text-sm text-gray-600">Student Email</label>
+                    <input 
+                        id="lookupEmail" 
+                        name="email" 
+                        type="email" 
+                        required
+                        placeholder="example@gmail.com"
+                        class="w-full border rounded-md px-3 py-2 mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 </div>
-                <div class="mb-6">
-                    <label class="block text-sm font-semibold mb-1">Email</label>
-                    <input class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-brand outline-none" type="email" name="email" placeholder="student@example.com">
+
+                <p id="parentLookupError" class="hidden text-sm text-red-500"></p>
+
+                <!-- Buttons -->
+                <div class="flex gap-2 mt-3">
+                    <button 
+                        type="button"
+                        onclick="toggleModal(false)"
+                        class="w-1/2 border py-2 rounded-md text-gray-600 hover:bg-gray-100">
+                        Cancel
+                    </button>
+
+                    <button 
+                        type="submit"
+                        class="w-1/2 bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700">
+                        Continue
+                    </button>
                 </div>
-                <button type="submit" class="w-full bg-brand text-white font-bold py-3 rounded-lg hover:bg-brandDark transition-all">
-                    Submit Payment
-                </button>
+
             </form>
         </div>
+
     </div>
-</div>
+
+    </div>
+
+    <div id="guestModal" class="hidden fixed inset-0 z-50 items-center justify-center bg-black/55 px-4 backdrop-blur-sm">
+        <div class="w-full max-w-md rounded-[1.75rem] bg-white shadow-2xl border border-slate-200 overflow-hidden">
+            <div class="relative  py-6 text-black ">
+                <button type="button" onclick="toggleGuestModal(false)" class="absolute right-4 top-4 text-black">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                </button>
+                <h2 class="text-2xl ml-7 mt-2 font-bold">Welcome, Guest!</h2>
+            </div>
+
+            <div class="px-6 mb-5 py-6">
+                <div class="rounded-2xl border border-blue-100 bg-blue-50/70 px-4 py-4">
+                    <p class="text-sm font-semibold text-slate-800">Please go to login as an account to pay fee.</p>
+                    <p class="mt-2 text-sm text-slate-600 leading-relaxed">
+                        Once you sign in, you can continue to pay fees normally and access the payment modal.
+                    </p>
+                </div>
+
+                <div class="mt-6 grid gap-3">
+                    <div class="flex items-center gap-3 rounded-2xl bg-slate-200 px-4 py-3">
+                        <div class="h-10 w-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
+                            <i class="fa-solid fa-lock"></i>
+                        </div>
+                        <div>
+                            <p class="text-sm font-semibold text-slate-900">Secure access</p>
+                            <p class="text-xs text-slate-500">Only logged-in users can pay fees.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="relative top-8 flex items-center justify-end gap-3">
+                    <button type="button" onclick="toggleGuestModal(false)" class="px-5 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50">
+                        Close
+                    </button>
+                    <a href="../Components/Login.php" class="px-5 py-2.5 rounded-xl bg-brand text-white font-semibold hover:bg-brandDark no-underline inline-flex items-center gap-2">
+                        <i class="fa-solid fa-right-to-bracket"></i>
+                        Login
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- QR modal -->
+    <div id="qrModal" class="hidden fixed inset-0 z-[160] items-center justify-center p-4">
+        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeQR()"></div>
+
+        <div class="relative bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+            <div class="p-5 border-b border-gray-100 text-center">
+                <h2 class="text-xl font-bold text-gray-800">Scan QR to Pay</h2>
+            </div>
+
+            <div class="p-6 text-center">
+                <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[240px] h-[240px] object-contain" />
+                <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
+
+                <div id="qrStatus" class="mt-4 rounded-lg bg-blue-50 text-blue-700 px-4 py-3 text-sm">
+                    Waiting for payment confirmation...
+                </div>
+
+                <button onclick="closeQR()" class="mt-4 text-red-500">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Receipt -->
+    <div id="receipt" class="hidden fixed inset-0 z-[170] items-center justify-center p-4 sm:p-6">
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="closeReceipt(false)"></div>
+        <div class="relative bg-white rounded-2xl w-full max-w-md shadow-2xl p-5 text-left">
+            <h2 class="text-xl font-bold mb-3">Receipt</h2>
+            <p>Payer Name: <span id="payerName">-</span></p>
+            <p>Payer Account: <span id="payerAccount">-</span></p>
+            <p>Amount: $<span id="receiptAmount">0.00</span></p>
+            <p>Method: <span id="receiptMethod">-</span></p>
+            <p>Bill No: <span id="receiptBillNo">-</span></p>
+            <p>Receipt No: <span id="receiptCode">-</span></p>
+            <p>Paid To: <span id="receiptPaidTo">-</span></p>
+            <p>Date: <span id="payDate"></span></p>
+            <div class="text-green-600 font-bold mt-4">✔ Payment Successful</div>
+
+            <button type="button" onclick="closeReceipt(true)" class="mt-4 w-full bg-brand text-white font-semibold py-2 rounded-lg hover:bg-brandDark">
+                Done
+            </button>
         </div>
     </div>
 </div>
@@ -295,40 +397,137 @@ include '../Categories/header.php';
     }
     // Command Modal
     // Function សម្រាប់បើក និង បិទ Modal
-function toggleModal(show) {
-    const modal = document.getElementById("paymentModal");
-    if (show) {
-        modal.classList.remove("hidden");
-        document.body.style.overflow = 'hidden'; // បិទ scroll កុំឱ្យរញ៉េរញ៉ៃ
-    } else {
-        modal.classList.add("hidden");
-        document.body.style.overflow = 'auto'; // បើក scroll វិញ
-    }
-}
-
-// ស្ទាក់ចាប់ព្រឹត្តិការណ៍ចុច (Event Listener)
-document.addEventListener('click', function(e) {
-    const target = e.target.closest('#payFeesBtn, a');
-    if (!target) return;
-
-    // ប្រសិនបើចុចលើប៊ូតុង Pay Fees
-    if (target.id === 'payFeesBtn') {
-        e.preventDefault();
-        
-        if (!isLoggedIn) {
-            alert("សូមចូលគណនីរបស់អ្នកជាមុនសិន ដើម្បីប្រើប្រាស់មុខងារនេះ!");
-            // បងអាច redirect ទៅកាន់ login page បន្ថែម
-            // window.location.href = '../Components/Login.php';
+    function toggleModal(show) {
+        const modal = document.getElementById("paymentModal");
+        const form = document.getElementById("parentLookupForm");
+        const error = document.getElementById("parentLookupError");
+        if (show) {
+            modal.style.display = 'flex';
+            modal.classList.remove("hidden");
+            modal.classList.add("flex");
+            document.body.style.overflow = 'hidden'; // បិទ scroll កុំឱ្យរញ៉េរញ៉ៃ
+            if (error) {
+                error.classList.add("hidden");
+                error.textContent = "";
+            }
         } else {
-            toggleModal(true);
+            modal.classList.add("hidden");
+            modal.classList.remove("flex");
+            modal.style.display = 'none';
+            document.body.style.overflow = 'auto'; // បើក scroll វិញ
+            if (form) {
+                form.reset();
+            }
+            if (error) {
+                error.classList.add("hidden");
+                error.textContent = "";
+            }
         }
     }
-});
 
-// ចុច 'Escape' ដើម្បីបិទ Modal
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') toggleModal(false);
-});
+    function toggleGuestModal(show) {
+        const modal = document.getElementById("guestModal");
+        if (!modal) return;
+
+        modal.style.display = show ? 'flex' : 'none';
+        modal.classList.toggle('hidden', !show);
+        modal.classList.toggle('flex', show);
+    }
+
+    function handlePayFeesClick(event) {
+        if (event) {
+            event.preventDefault();
+        }
+
+        if (!isLoggedIn) {
+            toggleGuestModal(true);
+            return;
+        }
+
+        if (userRole === 1 || userRole === 2) {
+            window.location.href = paymentPageUrl;
+            return;
+        }
+
+        toggleModal(true);
+    }
+
+    function setParentLookupError(message) {
+        const error = document.getElementById("parentLookupError");
+        if (!error) {
+            return;
+        }
+
+        if (message) {
+            error.textContent = message;
+            error.classList.remove("hidden");
+        } else {
+            error.textContent = "";
+            error.classList.add("hidden");
+        }
+    }
+
+    async function handleParentLookupSubmit(event) {
+        event.preventDefault();
+
+        const stuId = document.getElementById('lookupStuId')?.value.trim();
+        const name = document.getElementById('lookupName')?.value.trim();
+        const email = document.getElementById('lookupEmail')?.value.trim();
+
+        if (!stuId || !name || !email) {
+            setParentLookupError('Please fill in student ID, name, and email.');
+            return;
+        }
+
+        const submitBtn = event.currentTarget.querySelector('button[type="submit"]');
+        const originalText = submitBtn ? submitBtn.textContent : '';
+
+        try {
+            setParentLookupError('');
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Checking...';
+            }
+
+            const response = await fetch(`../Components/lookup_student.php?${new URLSearchParams({
+                stu_id: stuId,
+                name,
+                email
+            }).toString()}`, {
+                cache: 'no-store'
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success || !data.student) {
+                throw new Error(data.message || 'Student lookup failed.');
+            }
+
+            const student = data.student;
+
+            toggleModal(false);
+
+            currentReceipt.payerName = student.name || '-';
+            currentReceipt.payerAccount = student.email || '-';
+            currentReceipt.amount = Number(student.total_fee || 0);
+            updateReceipt(currentReceipt);
+
+            showQR(student.id, student.total_fee || 0);
+        } catch (error) {
+            console.error('Student lookup error:', error);
+            setParentLookupError(error.message || 'Unable to verify student information.');
+        } finally {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = originalText || 'Continue to QR';
+            }
+        }
+    }
+
+    // ចុច 'Escape' ដើម្បីបិទ Modal
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') toggleModal(false);
+    });
 
 
     // Animation Title
@@ -369,33 +568,437 @@ document.addEventListener('keydown', (e) => {
         type();
 
     });
-    // if user do not has to stay in account, cannot pay
-    document.addEventListener('click', function(e) {
-        const target = e.target.closest('button, a');
-        if (!target) return;
 
-        // ១. ករណី User មិនទាន់ Login
-        if (!isLoggedIn) {
-            // អនុញ្ញាតឱ្យចុចតែលើ Link ទៅកាន់ Login/Register ប៉ុណ្ណោះ
-            const isAuthLink = target.href && (
-                target.href.includes('Login.php') ||
-                target.href.includes('Register.php')
-            );
-
-            if (!isAuthLink) {
-                e.preventDefault();
-                e.stopImmediatePropagation(); // បញ្ឈប់គ្រប់ Script ផ្សេងទៀតមិនឱ្យរត់
-                alert("សូមចូលគណនីរបស់អ្នកជាមុនសិន ដើម្បីប្រើប្រាស់មុខងារនេះ!");
-                return false;
-            }
+    document.addEventListener('DOMContentLoaded', function() {
+        const lookupForm = document.getElementById('parentLookupForm');
+        if (lookupForm) {
+            lookupForm.addEventListener('submit', handleParentLookupSubmit);
         }
 
-        // ២. ករណី User បាន Login រួចហើយ និងចុចចំប៊ូតុង Pay Fees
-        else if (isLoggedIn && target.id === 'payFeesBtn') {
-            e.preventDefault();
-            toggleModal(true); // ហៅ function បើក Modal នៅទីនេះវិញ
+    });
+
+    // Payment Logic
+    
+    let currentStudent = null;
+    let currentAmount = null;
+    let currentBillNo = null;
+    let currentMd5 = null;
+    let autoQrOpened = false;
+    let qrReady = false;
+    let qrRefreshInterval = null; // Timer for QR refresh
+    let paymentCheckInterval = null;
+    let currentReceipt = {
+        amount: 0,
+        method: 'Bakong QR',
+        billNo: '',
+        receiptCode: '',
+        paidAt: '',
+        bankName: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay'), ENT_QUOTES); ?>',
+        bankAccount: '<?php echo htmlspecialchars(trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt'), ENT_QUOTES); ?>',
+        bankCity: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH'), ENT_QUOTES); ?>'
+    };
+
+    function buildQrPlaceholder(label) {
+        const safeLabel = String(label || 'Loading').replace(/[<>&"]/g, '');
+        const svg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220">
+                <rect width="220" height="220" fill="#f8fafc"/>
+                <rect x="10" y="10" width="200" height="200" rx="18" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+                <text x="110" y="110" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="18" fill="#475569">${safeLabel}</text>
+            </svg>
+        `;
+
+        return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+    }
+
+    function buildQrRequestUrl(studentId, amount) {
+        const params = new URLSearchParams({
+            student_id: String(studentId),
+            amount: String(amount),
+            qr_mode: "static",
+            _: String(Date.now())
+        });
+
+        return "../Components/generate_qr.php?" + params.toString();
+    }
+
+    function setConfirmButtonState(disabled, label) {
+        const confirmBtn = document.getElementById('confirmPaymentBtn');
+
+        if (!confirmBtn) {
+            return;
         }
-    }, true); // ប្រើ true (Capturing phase) ដើម្បីស្ទាក់ចាប់មុនគេបង្អស់
+
+        confirmBtn.disabled = disabled;
+        confirmBtn.textContent = label;
+        confirmBtn.classList.toggle('opacity-60', disabled);
+        confirmBtn.classList.toggle('cursor-not-allowed', disabled);
+    }
+
+    function updateReceipt(details) {
+        const receipt = details || currentReceipt;
+
+        const amountEl = document.getElementById('receiptAmount');
+        const methodEl = document.getElementById('receiptMethod');
+        const bankNameEl = document.getElementById('receiptBankName');
+        const bankAccountEl = document.getElementById('receiptBankAccount');
+        const bankCityEl = document.getElementById('receiptBankCity');
+        const billNoEl = document.getElementById('receiptBillNo');
+        const receiptCodeEl = document.getElementById('receiptCode');
+        const payDateEl = document.getElementById('payDate');
+        const paidToEl = document.getElementById('receiptPaidTo');
+        const payerNameEl = document.getElementById('payerName');
+        const payerAccountEl = document.getElementById('payerAccount');
+
+        if (payerNameEl) payerNameEl.textContent = receipt.payerName || '-';
+        if (payerAccountEl) payerAccountEl.textContent = receipt.payerAccount || '-';
+        if (amountEl) amountEl.textContent = Number(receipt.amount || currentAmount || 0).toFixed(2);
+        if (methodEl) methodEl.textContent = receipt.method || 'Bakong QR';
+        if (bankNameEl) bankNameEl.textContent = receipt.bankName || '';
+        if (bankAccountEl) bankAccountEl.textContent = receipt.bankAccount || '';
+        if (bankCityEl) bankCityEl.textContent = receipt.bankCity || '';
+        if (billNoEl) billNoEl.textContent = receipt.billNo || '-';
+        if (receiptCodeEl) receiptCodeEl.textContent = receipt.receiptCode || '-';
+        if (payDateEl) payDateEl.textContent = receipt.paidAt || '';
+        if (paidToEl) paidToEl.textContent = receipt.bankName || '';
+    }
+
+    // Make button pay runs
+    // Print reciept
+    function printReceipt() {
+        var content = document.getElementById('receipt').innerHTML;
+        var myWindow = window.open('', '', 'width=800,height=600');
+        myWindow.document.write(content);
+        myWindow.document.close();
+        myWindow.print();
+    }
+
+    function closeReceipt(refreshPage) {
+        const receipt = document.getElementById('receipt');
+        if (receipt) {
+            receipt.classList.add('hidden');
+            receipt.classList.remove('flex');
+            receipt.style.display = 'none';
+        }
+        document.body.style.overflow = 'auto';
+
+        if (refreshPage) {
+            window.location.reload();
+        }
+    }
+
+    function closeQR() {
+        document.getElementById('qrModal').classList.add('hidden');
+        document.getElementById('qrModal').classList.remove('flex');
+        document.body.style.overflow = 'auto';
+        setConfirmButtonState(false, 'I Have Paid');
+
+        // Stop QR refresh when user cancels
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+            qrRefreshInterval = null;
+        }
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
+    }
+
+    function confirmPayment() {
+        if (!qrReady || !currentStudent || !currentAmount) {
+            alert("Please wait for the QR code to finish loading first.");
+            return;
+        }
+
+        setConfirmButtonState(true, 'Saving...');
+
+        fetch("", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                credentials: "same-origin",
+                body: new URLSearchParams({
+                    pay: "1",
+                    student_id: String(currentStudent),
+                    amount: String(currentAmount),
+                    method: "Bakong QR",
+                    bill_no: String(currentBillNo || "")
+                }).toString()
+            })
+            .then(async (res) => {
+                const contentType = res.headers.get("content-type") || "";
+                const raw = await res.text();
+
+                if (!contentType.includes("application/json")) {
+                    throw new Error("Your session may have expired. Please reload the page and try again.");
+                }
+
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("The server returned an invalid payment response.");
+                }
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || "Failed to save payment.");
+                }
+
+                return data;
+            })
+            .then(data => {
+                alert("Payment Successful!");
+
+                closeQR();
+
+                document.getElementById('receipt').classList.remove('hidden');
+                document.getElementById('receipt').style.display = 'flex';
+
+                document.getElementById('payDate').innerText = data.paid_at || new Date().toLocaleString();
+
+                // Stop QR refresh on successful payment
+                if (qrRefreshInterval) {
+                    clearInterval(qrRefreshInterval);
+                    qrRefreshInterval = null;
+                }
+            })
+            .catch(err => {
+                console.error("Payment save error:", err);
+                alert(err.message || "Payment could not be completed.");
+            })
+            .finally(() => {
+                setConfirmButtonState(false, 'I Have Paid');
+            });
+    }
+
+    function showReceipt() {
+        document.getElementById('receipt').classList.remove('hidden');
+    }
+
+    function closeQRAuto() {
+        document.getElementById('qrModal').classList.add('hidden');
+        document.getElementById('qrModal').style.display = 'none';
+        document.body.style.overflow = 'auto';
+
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
+    }
+
+    function checkPaymentAuto(billNo, studentId, amount) {
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
+
+        paymentCheckInterval = setInterval(() => {
+            fetch(`../Components/check_payment.php?bill_no=${billNo}&md5=${encodeURIComponent(currentMd5 || billNo || '')}&hash=${encodeURIComponent(currentMd5 || billNo || '')}&student_id=${studentId}&amount=${amount}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (!data || data.status !== "PAID") {
+                        console.log("CHECK PAYMENT:", data);
+                        return;
+                    }
+                    currentReceipt.payerName = data.account_name || data.payer_name || '-';
+                    currentReceipt.payerAccount = data.payer_account || '-';
+
+                    if (paymentCheckInterval) {
+                        clearInterval(paymentCheckInterval);
+                        paymentCheckInterval = null;
+                    }
+
+                    const paidAt = new Date().toLocaleString();
+                    currentReceipt.amount = Number(data.money_paid || amount || currentReceipt.amount || 0);
+                    currentReceipt.billNo = billNo || currentReceipt.billNo;
+                    currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                    currentReceipt.paidAt = paidAt;
+                    currentReceipt.method = data.method || currentReceipt.method || 'Bakong QR';
+                    currentReceipt.bankName = data.bank_name || currentReceipt.bankName;
+                    currentReceipt.bankAccount = data.bank_account || currentReceipt.bankAccount;
+                    currentReceipt.bankCity = data.bank_city || currentReceipt.bankCity;
+                    updateReceipt(currentReceipt);
+
+                    // STOP INTERVALS
+                    if (paymentCheckInterval) {
+                        clearInterval(paymentCheckInterval);
+                        paymentCheckInterval = null;
+                    }
+
+                    if (qrRefreshInterval) {
+                        clearInterval(qrRefreshInterval);
+                        qrRefreshInterval = null;
+                    }
+
+                    // HIDE QR MODAL (IMPORTANT FIX)
+                    const qrModal = document.getElementById('qrModal');
+                    qrModal.classList.add('hidden');
+                    qrModal.classList.remove('flex');
+                    qrModal.style.display = 'none';
+
+                    // SHOW RECEIPT
+                    const receipt = document.getElementById('receipt');
+                    receipt.classList.remove('hidden');
+                    receipt.classList.add('flex');
+                    receipt.style.display = 'flex';
+
+                    document.getElementById('payDate').innerText = paidAt;
+
+                    alert(
+                        "Account Name: " + (currentReceipt.payerName || '-') + "\n" +
+                        "Money Paid: $" + Number(currentReceipt.amount || 0).toFixed(2) + "\n" +
+                        "Receipt: " + (currentReceipt.receiptCode || '-') + "\n" +
+                        "Bank / Account: " + (currentReceipt.bankName || "") + "\n" +
+                        "Account No: " + (currentReceipt.bankAccount || "") + "\n" +
+                        "Time: " + paidAt
+                    );
+                })
+                .catch(err => {
+                    console.error("Payment check error:", err);
+                });
+        }, 5000);
+    }
+
+    function checkPayment(billNo, studentId, amount) {
+        let interval = setInterval(() => {
+            fetch(`../Components/check_payment.php?bill_no=${billNo}&md5=${encodeURIComponent(currentMd5 || billNo || '')}&hash=${encodeURIComponent(currentMd5 || billNo || '')}&student_id=${studentId}&amount=${amount}`)
+                .then(res => res.text())
+                .then(data => {
+                    if (data.trim() === "PAID") {
+                        clearInterval(interval); // បញ្ឈប់ការឆែក
+                        closeQR(); // បិទ Modal QR
+                        alert(`ការបង់ប្រាក់ចំនួន $${amount} បានជោគជ័យ!`);
+
+                        // បង្ហាញវិក្កយបត្រ
+                        document.getElementById('receipt').classList.remove('hidden');
+                        document.getElementById('receipt').style.display = 'flex';
+                        document.getElementById('payDate').innerText = new Date().toLocaleString();
+
+                        // Stop QR refresh on successful payment
+                        if (qrRefreshInterval) {
+                            clearInterval(qrRefreshInterval);
+                            qrRefreshInterval = null;
+                        }
+                    }
+                });
+        }, 5000); // ឆែករៀងរាល់ ៥ វិនាទីម្តង
+    }
+
+    function showQR(studentId, amount) {
+        document.getElementById('receipt').classList.add('hidden');
+        document.getElementById('receipt').classList.remove('flex');
+        currentStudent = studentId;
+        currentAmount = amount;
+        currentBillNo = null;
+        currentMd5 = null;
+        qrReady = false;
+
+        // Clear any existing refresh timer
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+            qrRefreshInterval = null;
+        }
+
+        document.getElementById('qrModal').classList.remove('hidden');
+        document.getElementById('qrModal').classList.add('flex');
+
+        const qrImg = document.getElementById('bakongQR');
+        qrImg.src = buildQrPlaceholder("Loading QR");
+        setConfirmButtonState(true, 'Loading QR...');
+
+        fetch(buildQrRequestUrl(studentId, amount), {
+                cache: "no-store"
+            })
+            .then(async (res) => {
+                const raw = await res.text();
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (error) {
+                    throw new Error("The QR service returned an invalid response.");
+                }
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.message || "Failed to generate Bakong QR.");
+                }
+
+                return data;
+            })
+            .then(data => {
+                currentBillNo = data.bill_no || null;
+                currentMd5 = data.md5 || null;
+                currentReceipt.billNo = data.bill_no || currentReceipt.billNo;
+                currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                currentReceipt.amount = Number(data.amount || amount || currentReceipt.amount || 0);
+                currentReceipt.bankName = data.merchant_name || currentReceipt.bankName;
+                currentReceipt.bankAccount = data.merchant_account || currentReceipt.bankAccount;
+                currentReceipt.bankCity = data.merchant_city || currentReceipt.bankCity;
+                updateReceipt(currentReceipt);
+                qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                qrReady = true;
+                setConfirmButtonState(false, 'I Have Paid');
+
+                checkPaymentAuto(currentBillNo, studentId, amount);
+            })
+            .catch(err => {
+                console.error("Error fetching QR:", err);
+                qrImg.src = buildQrPlaceholder("QR Failed");
+                qrReady = false;
+                setConfirmButtonState(true, 'QR Failed');
+                alert(err.message || "Unable to connect to Bakong server.");
+            });
+    }
+
+    function startQrRefresh(studentId, amount) {
+        // Clear any existing refresh timer
+        if (qrRefreshInterval) {
+            clearInterval(qrRefreshInterval);
+        }
+
+        // Refresh QR every 4 minutes (240000 ms) to prevent expiration
+        qrRefreshInterval = setInterval(() => {
+            console.log("Refreshing QR code to prevent expiration...");
+
+            const qrImg = document.getElementById('bakongQR');
+            qrImg.src = buildQrPlaceholder("Refreshing QR...");
+            setConfirmButtonState(true, 'Refreshing QR...');
+
+            fetch(buildQrRequestUrl(studentId, amount), {
+                    cache: "no-store"
+                })
+                .then(async (res) => {
+                    const raw = await res.text();
+                    let data = null;
+
+                    try {
+                        data = JSON.parse(raw);
+                    } catch (error) {
+                        throw new Error("The QR service returned an invalid response.");
+                    }
+
+                    if (!res.ok || !data.success) {
+                        throw new Error(data.message || "Failed to refresh Bakong QR.");
+                    }
+
+                    return data;
+                })
+                .then(data => {
+                    currentBillNo = data.bill_no || null;
+                    currentMd5 = data.md5 || null;
+                    qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                    setConfirmButtonState(false, 'I Have Paid');
+                    console.log("QR code refreshed successfully");
+                })
+                .catch(err => {
+                    console.error("Error refreshing QR:", err);
+                    qrImg.src = buildQrPlaceholder("Refresh Failed");
+                    setConfirmButtonState(true, 'Refresh Failed');
+                });
+        }, 240000); // 4 minutes
+    }
 </script>
 <?php
 include '../Components/Footer.php';

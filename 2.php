@@ -36,6 +36,7 @@ if (isset($_POST['pay'])) {
     $student_id = isset($_POST['student_id']) ? (int) $_POST['student_id'] : 0;
     $amount = isset($_POST['amount']) ? (float) $_POST['amount'] : 0;
     $method = isset($_POST['method']) ? trim($_POST['method']) : 'Bakong QR';
+    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : '';
 
     if ($student_id <= 0 || $amount <= 0) {
         echo json_encode([
@@ -45,9 +46,65 @@ if (isset($_POST['pay'])) {
         exit();
     }
 
+    if ($billNo !== '') {
+        $existingStmt = $conn->prepare("SELECT id FROM tbl_payment WHERE bill_no = ? LIMIT 1");
+        if ($existingStmt) {
+            $existingStmt->bind_param("s", $billNo);
+            $existingStmt->execute();
+            $existingRes = $existingStmt->get_result();
+            if ($existingRes && ($existingRow = $existingRes->fetch_assoc())) {
+                $existingPaymentId = (int) ($existingRow['id'] ?? 0);
+                $existingReceipt = '';
+                if ($existingPaymentId > 0) {
+                    $receiptStmt = $conn->prepare("SELECT receipt_code FROM tbl_receipt WHERE payment_id = ? LIMIT 1");
+                    if ($receiptStmt) {
+                        $receiptStmt->bind_param("i", $existingPaymentId);
+                        $receiptStmt->execute();
+                        $receiptRes = $receiptStmt->get_result();
+                        if ($receiptRes && ($receiptRow = $receiptRes->fetch_assoc())) {
+                            $existingReceipt = (string) ($receiptRow['receipt_code'] ?? '');
+                        }
+                        $receiptStmt->close();
+                    }
+                }
+
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Payment already saved.',
+                    'payment_id' => $existingPaymentId,
+                    'receipt_code' => $existingReceipt,
+                    'bill_no' => $billNo,
+                    'paid_at' => date('Y-m-d H:i:s')
+                ]);
+                $existingStmt->close();
+                exit();
+            }
+            $existingStmt->close();
+        }
+    }
+
+    $fee_id = 0;
+    $feeStmt = $conn->prepare("
+        SELECT f.id AS fee_id
+        FROM tbl_student s
+        LEFT JOIN tbl_class c ON s.class_id = c.id
+        LEFT JOIN tbl_fee f ON c.id = f.class_id
+        WHERE s.id = ?
+        LIMIT 1
+    ");
+    if ($feeStmt) {
+        $feeStmt->bind_param("i", $student_id);
+        $feeStmt->execute();
+        $feeRes = $feeStmt->get_result();
+        if ($feeRes && ($feeRow = $feeRes->fetch_assoc())) {
+            $fee_id = (int) ($feeRow['fee_id'] ?? 0);
+        }
+        $feeStmt->close();
+    }
+
     $stmt = $conn->prepare("
-        INSERT INTO tbl_payment (student_id, amount, payment_date, method, bill_no)
-        VALUES (?, ?, CURDATE(), ?, ?)
+        INSERT INTO tbl_payment (student_id, fee_id, amount, payment_date, method, bill_no)
+        VALUES (?, ?, ?, CURDATE(), ?, ?)
     ");
 
     if (!$stmt) {
@@ -59,13 +116,27 @@ if (isset($_POST['pay'])) {
         exit();
     }
 
-    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : null;
-    $stmt->bind_param("idsss", $student_id, $amount, $method, $billNo);
+    $stmt->bind_param("iidss", $student_id, $fee_id, $amount, $method, $billNo);
 
     if ($stmt->execute()) {
+        $payment_id = (int) $stmt->insert_id;
+        $receipt_code = '';
+        if ($payment_id > 0) {
+            $receipt_code = 'RCPT-' . date('YmdHis') . '-' . $payment_id;
+            $receiptStmt = $conn->prepare("INSERT INTO tbl_receipt (payment_id, receipt_code) VALUES (?, ?)");
+            if ($receiptStmt) {
+                $receiptStmt->bind_param("is", $payment_id, $receipt_code);
+                $receiptStmt->execute();
+                $receiptStmt->close();
+            }
+        }
+
         echo json_encode([
             'success' => true,
             'message' => 'Payment saved successfully.',
+            'payment_id' => $payment_id,
+            'receipt_code' => $receipt_code,
+            'bill_no' => $billNo,
             'paid_at' => date('Y-m-d H:i:s')
         ]);
     } else {

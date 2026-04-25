@@ -40,6 +40,8 @@ include '../Categories/header.php';
 <script>
   // បង្កើត Variable ក្នុង JS ដើម្បីស្គាល់ស្ថានភាព Login ពី PHP
   const isLoggedIn = <?php echo isset($_SESSION['is_admin']) ? 'true' : 'false'; ?>;
+  const userRole = <?php echo isset($_SESSION['is_admin']) ? (int) $_SESSION['is_admin'] : 0; ?>;
+  const paymentPageUrl = userRole === 2 ? '../Pages/Stu_dashoard.php' : '../Pages/Dashboards.php';
 </script>
 
 <!-- ================= ABOUT HERO ================= -->
@@ -269,12 +271,6 @@ include '../Categories/header.php';
         <h3 class="font-bold text-slate-800 text-lg mt-1 mb-2">Confirm & Pay</h3>
         <p class="text-slate-500 text-sm">Complete your payment and receive an instant e-receipt to your email address.</p>
       </div>
-    </div>
-    <div class="text-center mt-12">
-      <button id="payFeesBtn" class="<?php echo !isset($_SESSION['is_admin']) ? 'opacity-50 cursor-not-allowed' : ''; ?> px-10 py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-200 transition-all hover:scale-105 text-sm">
-        Pay Fees Now
-        <span class="text-base">→</span>
-      </button>
     </div>
   </div>
 </section>
@@ -625,6 +621,7 @@ include '../Categories/header.php';
 
     }); // if user do not has to stay in account, cannot pay
     document.addEventListener('click', function(e) {
+      return;
       const target = e.target.closest('button, a');
       if (!target) return;
 
@@ -647,7 +644,7 @@ include '../Categories/header.php';
       // ២. ករណី User បាន Login រួចហើយ និងចុចចំប៊ូតុង Pay Fees
       else if (isLoggedIn && target.id === 'payFeesBtn') {
         e.preventDefault();
-        toggleModal(true); // ហៅ function បើក Modal នៅទីនេះវិញ
+        window.location.href = paymentPageUrl;
       }
     }, true); // ប្រើ true (Capturing phase) ដើម្បីស្ទាក់ចាប់មុនគេបង្អស់
   </script>

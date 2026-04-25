@@ -1,4 +1,233 @@
 <?php
+$mailConfig = require __DIR__ . '/../Components/mail_config.php';
+$adminEmail = $mailConfig['admin_email'] ?? 'khimreaksmey123@gmail.com';
+$smtpEmail = $mailConfig['smtp_email'] ?? $adminEmail;
+$smtpAppPassword = preg_replace('/\s+/', '', $mailConfig['smtp_app_password'] ?? '');
+$formStatus = '';
+$formMessage = '';
+
+if (($_GET['sent'] ?? '') === '1') {
+    $formStatus = 'success';
+    $formMessage = 'Thank you. Your message was sent to our admin email.';
+} elseif (($_GET['saved'] ?? '') === '1') {
+    $formStatus = 'success';
+    $formMessage = 'Thank you. Your message was saved for our admin team to review.';
+}
+
+function smtpRead($socket)
+{
+    $response = '';
+
+    while ($line = fgets($socket, 515)) {
+        $response .= $line;
+
+        if (isset($line[3]) && $line[3] === ' ') {
+            break;
+        }
+    }
+
+    return $response;
+}
+
+function smtpCommand($socket, $command, $expectedCodes)
+{
+    if ($command !== null) {
+        fwrite($socket, $command . "\r\n");
+    }
+
+    $response = smtpRead($socket);
+    $code = (int) substr($response, 0, 3);
+
+    return in_array($code, (array) $expectedCodes, true)
+        ? [true, $response]
+        : [false, $response];
+}
+
+function sendContactEmail($to, $fromEmail, $fromPassword, $replyName, $replyEmail, $subject, $body)
+{
+    if ($fromPassword === '') {
+        return [false, 'Please add the Gmail App Password for ' . $fromEmail . ' in $smtpAppPassword at the top of Contact.php.'];
+    }
+
+    if (strlen($fromPassword) !== 16) {
+        return [false, 'The Gmail App Password must be 16 characters. Create a Gmail App Password for ' . $fromEmail . ', paste it into Components/mail_config.php, then restart Apache.'];
+    }
+
+    if (!extension_loaded('openssl')) {
+        return [false, 'PHP OpenSSL is not enabled, so Gmail SMTP cannot start a secure connection. Enable openssl in php.ini and restart Apache.'];
+    }
+
+    $socket = stream_socket_client('tcp://smtp.gmail.com:587', $errorNumber, $errorMessage, 30);
+
+    if (!$socket) {
+        return [false, 'SMTP connection failed: ' . $errorMessage];
+    }
+
+    stream_set_timeout($socket, 30);
+
+    [$ok, $response] = smtpCommand($socket, null, 220);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP greeting failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'EHLO localhost', 250);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP EHLO failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'STARTTLS', 220);
+    if (!$ok || !stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
+        fclose($socket);
+        return [false, 'SMTP TLS failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'EHLO localhost', 250);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP secure EHLO failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'AUTH LOGIN', 334);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP auth start failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, base64_encode($fromEmail), 334);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP username failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, base64_encode($fromPassword), 235);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP password failed. Use a Gmail App Password, not your normal Gmail password.'];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'MAIL FROM:<' . $fromEmail . '>', 250);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP sender failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'RCPT TO:<' . $to . '>', [250, 251]);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP recipient failed: ' . trim($response)];
+    }
+
+    [$ok, $response] = smtpCommand($socket, 'DATA', 354);
+    if (!$ok) {
+        fclose($socket);
+        return [false, 'SMTP data failed: ' . trim($response)];
+    }
+
+    $safeReplyName = str_replace(['"', "\r", "\n"], ['', ' ', ' '], $replyName);
+    $safeSubject = str_replace(["\r", "\n"], ' ', $subject);
+    $message = [
+        'Date: ' . date(DATE_RFC2822),
+        'To: Admin <' . $to . '>',
+        'From: RUPP-PAY Contact <' . $fromEmail . '>',
+        'Reply-To: "' . $safeReplyName . '" <' . $replyEmail . '>',
+        'Subject: ' . $safeSubject,
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset=UTF-8',
+        '',
+        str_replace("\n.", "\n..", str_replace(["\r\n", "\r"], "\n", $body)),
+    ];
+
+    fwrite($socket, implode("\r\n", $message) . "\r\n.\r\n");
+    $response = smtpRead($socket);
+    $code = (int) substr($response, 0, 3);
+
+    smtpCommand($socket, 'QUIT', 221);
+    fclose($socket);
+
+    return $code === 250
+        ? [true, 'Email sent successfully.']
+        : [false, 'SMTP send failed: ' . trim($response)];
+}
+
+function saveContactMessage($firstName, $lastName, $email, $subject, $message, $emailStatus)
+{
+    $storageDir = __DIR__ . '/../storage';
+    $storageFile = $storageDir . '/contact_messages.csv';
+
+    if (!is_dir($storageDir) && !mkdir($storageDir, 0777, true)) {
+        return false;
+    }
+
+    $isNewFile = !file_exists($storageFile);
+    $file = fopen($storageFile, 'ab');
+
+    if (!$file) {
+        return false;
+    }
+
+    if ($isNewFile) {
+        fputcsv($file, ['Date', 'First Name', 'Last Name', 'Email', 'Subject', 'Message', 'Email Status']);
+    }
+
+    fputcsv($file, [date('Y-m-d H:i:s'), $firstName, $lastName, $email, $subject, $message, $emailStatus]);
+    fclose($file);
+
+    return true;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $firstName = trim($_POST['firstName'] ?? '');
+    $lastName = trim($_POST['lastName'] ?? '');
+    $studentEmail = trim($_POST['studentEmail'] ?? '');
+    $subject = trim($_POST['subject'] ?? '');
+    $message = trim($_POST['message'] ?? '');
+
+    $subjectLabels = [
+        'payment' => 'Payment Issue',
+        'account' => 'Account Access',
+        'other' => 'Other Inquiry',
+    ];
+
+    if ($firstName === '' || $lastName === '' || $studentEmail === '' || $subject === '' || $message === '') {
+        $formStatus = 'error';
+        $formMessage = 'Please complete every field before submitting your inquiry.';
+    } elseif (!filter_var($studentEmail, FILTER_VALIDATE_EMAIL)) {
+        $formStatus = 'error';
+        $formMessage = 'Please enter a valid student email address.';
+    } else {
+        $headerName = preg_replace('/[\r\n]+/', ' ', $firstName . ' ' . $lastName);
+        $headerEmail = preg_replace('/[\r\n]+/', '', $studentEmail);
+        $safeSubject = $subjectLabels[$subject] ?? 'Other Inquiry';
+        $mailSubject = 'New RUPP-PAY Contact Inquiry: ' . $safeSubject;
+        $mailBody = "A new message was submitted from the RUPP-PAY contact form.\n\n";
+        $mailBody .= "Name: {$firstName} {$lastName}\n";
+        $mailBody .= "Student Email: {$studentEmail}\n";
+        $mailBody .= "Inquiry Subject: {$safeSubject}\n\n";
+        $mailBody .= "Message:\n{$message}\n";
+
+        $sent = false;
+        $sendError = 'Gmail SMTP is not configured.';
+
+        if ($smtpAppPassword !== '') {
+            [$sent, $sendError] = sendContactEmail($adminEmail, $smtpEmail, $smtpAppPassword, $headerName, $headerEmail, $mailSubject, $mailBody);
+        }
+
+        if ($sent) {
+            saveContactMessage($firstName, $lastName, $studentEmail, $safeSubject, $message, 'Sent to ' . $adminEmail);
+            header('Location: Contact.php?sent=1');
+            exit;
+        } elseif (saveContactMessage($firstName, $lastName, $studentEmail, $safeSubject, $message, 'Saved only: ' . $sendError)) {
+            header('Location: Contact.php?saved=1');
+            exit;
+        } else {
+            $formStatus = 'error';
+            $formMessage = 'Your message could not be sent or saved. Please contact admin directly at ' . $adminEmail . '.';
+        }
+    }
+}
+
 include '../Components/Navbar.php';
 include '../Categories/header.php';
 ?>
@@ -107,7 +336,7 @@ include '../Categories/header.php';
                     <div>
                         <h4 class="text-xl font-bold text-slate-950 mb-1.5">Email Address</h4>
                         <div class="space-y-1 text-slate-700 text-[15px] leading-relaxed">
-                            <a href="mailto:support@edupayportal.com" class="block font-medium hover:text-blue-600 hover:underline transition">support@edupayportal.com</a>
+                            <a href="mailto:support@gmail.com" class="block font-medium hover:text-blue-600 hover:underline transition">support@edupayportal.com</a>
                             <a href="mailto:billing@edupayportal.com" class="block font-medium hover:text-blue-600 hover:underline transition">billing@edupayportal.com</a>
                         </div>
                     </div>
@@ -124,33 +353,39 @@ include '../Categories/header.php';
                 </p>
             </div>
 
-            <form class="grid grid-cols-2 gap-x-6 gap-y-7">
+            <?php if ($formMessage !== ''): ?>
+                <div class="<?php echo $formStatus === 'success' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-red-50 border-red-200 text-red-700'; ?> border rounded-xl px-4 py-3 text-sm font-semibold">
+                    <?php echo htmlspecialchars($formMessage, ENT_QUOTES, 'UTF-8'); ?>
+                </div>
+            <?php endif; ?>
+
+            <form id="contactForm" method="POST" action="Contact.php" autocomplete="off" class="grid grid-cols-2 gap-x-6 gap-y-7">
                 <div class="col-span-1">
                     <label for="firstName" class="block text-slate-700 font-semibold mb-2.5 text-sm">First Name</label>
-                    <input type="text" id="firstName" placeholder="John" 
+                    <input type="text" id="firstName" name="firstName" placeholder="John" required autocomplete="off"
                         class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all text-[15px]">
                 </div>
 
                 <div class="col-span-1">
                     <label for="lastName" class="block text-slate-700 font-semibold mb-2.5 text-sm">Last Name</label>
-                    <input type="text" id="lastName" placeholder="Doe" 
+                    <input type="text" id="lastName" name="lastName" placeholder="Doe" required autocomplete="off"
                         class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all text-[15px]">
                 </div>
 
                 <div class="col-span-2">
-                    <label for="studentEmail" class="block text-slate-700 font-semibold mb-2.5 text-sm">Student Email Address</label>
-                    <input type="email" id="studentEmail" placeholder="john.doe@school.edu" 
+                    <label for="studentEmail" class="block text-slate-700 font-semibold mb-2.5 text-sm">Your Email Address</label>
+                    <input type="email" id="studentEmail" name="studentEmail" placeholder="john.doe@school.edu" required autocomplete="off"
                         class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all text-[15px]">
                 </div>
 
                 <div class="col-span-2">
                     <label for="subject" class="block text-slate-700 font-semibold mb-2.5 text-sm">Inquiry Subject</label>
                     <div class="relative">
-                        <select id="subject" 
+                        <select id="subject" name="subject" required
                             class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all text-[15px] appearance-none cursor-pointer">
-                            <option value="payment">Payment Issue</option>
-                            <option value="account">Account Access</option>
-                            <option value="other">Other Inquiry</option>
+                            <option value="payment" <?php echo ($_POST['subject'] ?? '') === 'payment' ? 'selected' : ''; ?>>Payment Issue</option>
+                            <option value="account" <?php echo ($_POST['subject'] ?? '') === 'account' ? 'selected' : ''; ?>>Account Access</option>
+                            <option value="other" <?php echo ($_POST['subject'] ?? '') === 'other' ? 'selected' : ''; ?>>Other Inquiry</option>
                         </select>
                         <div class="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
@@ -160,7 +395,7 @@ include '../Categories/header.php';
 
                 <div class="col-span-2">
                     <label for="message" class="block text-slate-700 font-semibold mb-2.5 text-sm">Your Message</label>
-                    <textarea id="message" rows="5" placeholder="Please describe your issue in detail..." 
+                    <textarea id="message" name="message" rows="5" placeholder="Please describe your issue in detail..." required autocomplete="off"
                         class="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all text-[15px] resize-none"></textarea>
                 </div>
 
@@ -170,8 +405,8 @@ include '../Categories/header.php';
                         Submit Inquiry
                     </button>
                 </div>
-            </div>
         </form>
+        </div>
     </div>
 </div>
 
@@ -179,6 +414,17 @@ include '../Categories/header.php';
   function back(){
     window.history.back()
   }
+
+  function clearContactForm() {
+    const form = document.getElementById('contactForm');
+
+    if (form) {
+      form.reset();
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', clearContactForm);
+  window.addEventListener('pageshow', clearContactForm);
 </script>
 
 <?php 

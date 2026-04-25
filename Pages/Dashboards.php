@@ -1,14 +1,75 @@
 <?php
 session_start();
-if (!isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 1) {
+if (!isset($_SESSION['is_admin']) || !in_array((int) $_SESSION['is_admin'], [1, 3], true)) {
     header('location:../Components/Login.php');
     exit();
 }
 
 include '../Components/connection.php';
 
+$currentClassId = isset($_GET['class_id']) ? (int) $_GET['class_id'] : 0;
 $student_id = isset($_GET['student_id']) ? (int) $_GET['student_id'] : 0;
 $paymentStudent = null;
+$studentReceipts = [];
+$chartMonths = [];
+$monthlyStudents = [];
+$monthlyPayments = [];
+$deptGenderStats = [];
+$paymentCounts = [];
+$paidStudentCounts = [];
+
+$currentYear = (int) date('Y');
+for ($m = 1; $m <= 12; $m++) {
+    $chartMonths[] = date('M', mktime(0, 0, 0, $m, 1, $currentYear));
+
+    $studentMonthStmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM tbl_student WHERE YEAR(created_at) = ? AND MONTH(created_at) = ?");
+    if ($studentMonthStmt) {
+        $studentMonthStmt->bind_param("ii", $currentYear, $m);
+        $studentMonthStmt->execute();
+        $studentMonthRes = $studentMonthStmt->get_result();
+        $studentMonthRow = $studentMonthRes ? $studentMonthRes->fetch_assoc() : null;
+        $monthlyStudents[] = (int) ($studentMonthRow['cnt'] ?? 0);
+        $studentMonthStmt->close();
+    } else {
+        $monthlyStudents[] = 0;
+    }
+
+    $paymentMonthStmt = $conn->prepare("SELECT COALESCE(SUM(amount), 0) AS total_amount, COUNT(*) AS payment_cnt, COUNT(DISTINCT student_id) AS paid_students FROM tbl_payment WHERE YEAR(payment_date) = ? AND MONTH(payment_date) = ?");
+    if ($paymentMonthStmt) {
+        $paymentMonthStmt->bind_param("ii", $currentYear, $m);
+        $paymentMonthStmt->execute();
+        $paymentMonthRes = $paymentMonthStmt->get_result();
+        $paymentMonthRow = $paymentMonthRes ? $paymentMonthRes->fetch_assoc() : null;
+        $monthlyPayments[] = (float) ($paymentMonthRow['total_amount'] ?? 0);
+        $paymentCounts[] = (int) ($paymentMonthRow['payment_cnt'] ?? 0);
+        $paidStudentCounts[] = (int) ($paymentMonthRow['paid_students'] ?? 0);
+        $paymentMonthStmt->close();
+    } else {
+        $monthlyPayments[] = 0;
+        $paymentCounts[] = 0;
+        $paidStudentCounts[] = 0;
+    }
+}
+
+$deptGenderStmt = $conn->prepare("
+    SELECT
+        COALESCE(c.department, 'Unknown') AS department,
+        SUM(CASE WHEN LOWER(COALESCE(s.gender, '')) = 'female' THEN 1 ELSE 0 END) AS girls,
+        SUM(CASE WHEN LOWER(COALESCE(s.gender, '')) = 'male' THEN 1 ELSE 0 END) AS boys
+    FROM tbl_student s
+    LEFT JOIN tbl_class c ON s.class_id = c.id
+    GROUP BY COALESCE(c.department, 'Unknown')
+    ORDER BY department ASC
+    LIMIT 8
+");
+if ($deptGenderStmt) {
+    $deptGenderStmt->execute();
+    $deptGenderRes = $deptGenderStmt->get_result();
+    while ($deptGenderRes && ($deptGenderRow = $deptGenderRes->fetch_assoc())) {
+        $deptGenderStats[] = $deptGenderRow;
+    }
+    $deptGenderStmt->close();
+}
 
 if ($student_id > 0) {
     $stmt = $conn->prepare("
@@ -20,7 +81,12 @@ if ($student_id > 0) {
             f.total_fee
         FROM tbl_student s
         LEFT JOIN tbl_class c ON s.class_id = c.id
-        LEFT JOIN tbl_fee f ON c.id = f.class_id
+        LEFT JOIN (
+            SELECT faculty_id, department, MAX(id) AS fee_id
+            FROM tbl_fee
+            GROUP BY faculty_id, department
+        ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+        LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
         WHERE s.id = ?
         LIMIT 1
     ");
@@ -28,6 +94,24 @@ if ($student_id > 0) {
     $stmt->execute();
     $paymentStudent = $stmt->get_result()->fetch_assoc();
     $stmt->close();
+
+    $receiptStmt = $conn->prepare("
+        SELECT p.payment_date, p.amount, p.method, p.bill_no, r.receipt_code
+        FROM tbl_payment p
+        LEFT JOIN tbl_receipt r ON p.id = r.payment_id
+        WHERE p.student_id = ?
+        ORDER BY p.id DESC
+        LIMIT 20
+    ");
+    if ($receiptStmt) {
+        $receiptStmt->bind_param("i", $student_id);
+        $receiptStmt->execute();
+        $receiptResult = $receiptStmt->get_result();
+        while ($receiptResult && ($receiptRow = $receiptResult->fetch_assoc())) {
+            $studentReceipts[] = $receiptRow;
+        }
+        $receiptStmt->close();
+    }
 }
 
 if (isset($_POST['pay'])) {
@@ -36,6 +120,7 @@ if (isset($_POST['pay'])) {
     $student_id = isset($_POST['student_id']) ? (int) $_POST['student_id'] : 0;
     $amount = isset($_POST['amount']) ? (float) $_POST['amount'] : 0;
     $method = isset($_POST['method']) ? trim($_POST['method']) : 'Bakong QR';
+    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : '';
 
     if ($student_id <= 0 || $amount <= 0) {
         echo json_encode([
@@ -45,9 +130,70 @@ if (isset($_POST['pay'])) {
         exit();
     }
 
+    if ($billNo !== '') {
+        $existingStmt = $conn->prepare("SELECT id FROM tbl_payment WHERE bill_no = ? LIMIT 1");
+        if ($existingStmt) {
+            $existingStmt->bind_param("s", $billNo);
+            $existingStmt->execute();
+            $existingRes = $existingStmt->get_result();
+            if ($existingRes && ($existingRow = $existingRes->fetch_assoc())) {
+                $existingPaymentId = (int) ($existingRow['id'] ?? 0);
+                $existingReceipt = '';
+                if ($existingPaymentId > 0) {
+                    $receiptStmt = $conn->prepare("SELECT receipt_code FROM tbl_receipt WHERE payment_id = ? LIMIT 1");
+                    if ($receiptStmt) {
+                        $receiptStmt->bind_param("i", $existingPaymentId);
+                        $receiptStmt->execute();
+                        $receiptRes = $receiptStmt->get_result();
+                        if ($receiptRes && ($receiptRow = $receiptRes->fetch_assoc())) {
+                            $existingReceipt = (string) ($receiptRow['receipt_code'] ?? '');
+                        }
+                        $receiptStmt->close();
+                    }
+                }
+
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Payment already saved.',
+                    'payment_id' => $existingPaymentId,
+                    'receipt_code' => $existingReceipt,
+                    'bill_no' => $billNo,
+                    'paid_at' => date('Y-m-d H:i:s')
+                ]);
+                $existingStmt->close();
+                exit();
+            }
+            $existingStmt->close();
+        }
+    }
+
+    $fee_id = 0;
+    $feeStmt = $conn->prepare("
+        SELECT f.id AS fee_id
+        FROM tbl_student s
+        LEFT JOIN tbl_class c ON s.class_id = c.id
+        LEFT JOIN (
+            SELECT faculty_id, department, MAX(id) AS fee_id
+            FROM tbl_fee
+            GROUP BY faculty_id, department
+        ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+        LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
+        WHERE s.id = ?
+        LIMIT 1
+    ");
+    if ($feeStmt) {
+        $feeStmt->bind_param("i", $student_id);
+        $feeStmt->execute();
+        $feeRes = $feeStmt->get_result();
+        if ($feeRes && ($feeRow = $feeRes->fetch_assoc())) {
+            $fee_id = (int) ($feeRow['fee_id'] ?? 0);
+        }
+        $feeStmt->close();
+    }
+
     $stmt = $conn->prepare("
-        INSERT INTO tbl_payment (student_id, amount, payment_date, method, bill_no)
-        VALUES (?, ?, CURDATE(), ?, ?)
+        INSERT INTO tbl_payment (student_id, fee_id, amount, payment_date, method, bill_no)
+        VALUES (?, ?, ?, CURDATE(), ?, ?)
     ");
 
     if (!$stmt) {
@@ -59,13 +205,27 @@ if (isset($_POST['pay'])) {
         exit();
     }
 
-    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : null;
-    $stmt->bind_param("idsss", $student_id, $amount, $method, $billNo);
+    $stmt->bind_param("iidss", $student_id, $fee_id, $amount, $method, $billNo);
 
     if ($stmt->execute()) {
+        $payment_id = (int) $stmt->insert_id;
+        $receipt_code = '';
+        if ($payment_id > 0) {
+            $receipt_code = 'RCPT-' . date('YmdHis') . '-' . $payment_id;
+            $receiptStmt = $conn->prepare("INSERT INTO tbl_receipt (payment_id, receipt_code) VALUES (?, ?)");
+            if ($receiptStmt) {
+                $receiptStmt->bind_param("is", $payment_id, $receipt_code);
+                $receiptStmt->execute();
+                $receiptStmt->close();
+            }
+        }
+
         echo json_encode([
             'success' => true,
             'message' => 'Payment saved successfully.',
+            'payment_id' => $payment_id,
+            'receipt_code' => $receipt_code,
+            'bill_no' => $billNo,
             'paid_at' => date('Y-m-d H:i:s')
         ]);
     } else {
@@ -141,6 +301,15 @@ include '../Categories/header.php';
 
     <!-- Main Content -->
     <div class="ml-[270px] flex-1 p-8 min-w-0 overflow-hidden">
+        <?php if (isset($_GET['deleted'])): ?>
+            <div class="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-700">
+                <?php echo htmlspecialchars(ucfirst($_GET['deleted']), ENT_QUOTES, 'UTF-8'); ?> deleted successfully.
+            </div>
+        <?php elseif (isset($_GET['delete_error'])): ?>
+            <div class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+                Delete failed: <?php echo htmlspecialchars(substr((string) $_GET['delete_error'], 0, 220), ENT_QUOTES, 'UTF-8'); ?>
+            </div>
+        <?php endif; ?>
 
         <div id="home_button" class="show_hide">
             <h1 class="text-4xl fw-bold mb-2">Welcome To Admin !!</h1>
@@ -204,18 +373,21 @@ include '../Categories/header.php';
             <!-- Charts Row 1: Overview Line + Students Bar -->
             <div class="grid grid-cols-2 gap-4 mb-5">
 
-                <!-- Line Chart: Overview (Teacher vs Student) -->
+                <!-- Line Chart: Overview (New Students vs Payments) -->
                 <div class="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
                     <div class="flex items-center justify-between mb-4">
-                        <h3 class="text-sm font-bold text-gray-800">Overview</h3>
+                        <div>
+                            <h3 class="text-sm font-bold text-gray-800">Overview</h3>
+                            <p class="text-xs text-gray-400 mt-0.5">Live comparison from the database</p>
+                        </div>
                         <div class="flex items-center gap-4">
                             <div class="flex items-center gap-1.5">
                                 <span class="w-3 h-3 rounded-full bg-blue-600 inline-block"></span>
-                                <span class="text-xs text-gray-500 font-medium">Teacher</span>
+                                <span class="text-xs text-gray-500 font-medium">Students</span>
                             </div>
                             <div class="flex items-center gap-1.5">
                                 <span class="w-3 h-3 rounded-full bg-teal-400 inline-block"></span>
-                                <span class="text-xs text-gray-500 font-medium">Student</span>
+                                <span class="text-xs text-gray-500 font-medium">Payments</span>
                             </div>
                             <button class="text-gray-400 hover:text-gray-600">
                                 <i class="fa-solid fa-ellipsis-vertical"></i>
@@ -227,7 +399,7 @@ include '../Categories/header.php';
                     </div>
                 </div>
 
-                <!-- Bar Chart: Number of Students (Girls vs Boys) -->
+                <!-- Bar Chart: Number of Students (Girls vs Boys by Department) -->
                 <div class="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
                     <div class="flex items-center justify-between mb-4">
                         <h3 class="text-sm font-bold text-gray-800">Number of Students</h3>
@@ -260,7 +432,7 @@ include '../Categories/header.php';
                     <div class="flex items-center justify-between mb-4">
                         <div>
                             <h3 class="text-sm font-bold text-gray-800">Payment Collection</h3>
-                            <p class="text-xs text-gray-400 mt-0.5">Monthly fee revenue · <?php echo date('Y'); ?></p>
+                            <p class="text-xs text-gray-400 mt-0.5">Monthly payments and paid student activity · <?php echo date('Y'); ?></p>
                         </div>
                         <div class="flex items-center gap-4">
                             <div class="flex items-center gap-1.5">
@@ -269,7 +441,7 @@ include '../Categories/header.php';
                             </div>
                             <div class="flex items-center gap-1.5">
                                 <span class="w-3 h-3 rounded-full bg-red-400 inline-block"></span>
-                                <span class="text-xs text-gray-500 font-medium">Pending</span>
+                                <span class="text-xs text-gray-500 font-medium">Paid students</span>
                             </div>
                         </div>
                     </div>
@@ -373,7 +545,7 @@ include '../Categories/header.php';
 
                         <thead class="text-gray-500 text-center">
                             <tr>
-                                <th>#</th>
+                                <th>NO.</th>
                                 <th class="text-left relative left-5">Student</th>
                                 <th>ID</th>
                                 <th>Amount</th>
@@ -433,13 +605,13 @@ include '../Categories/header.php';
 
                                     <td class="p-3">
                                         <button onclick='printReceipt(
-                <?php echo json_encode($row["name"]); ?>,
-                <?php echo json_encode($row["stu_id"]); ?>,
-                <?php echo json_encode(number_format($row["amount"], 2)); ?>,
-                <?php echo json_encode($row["method"]); ?>,
-                <?php echo json_encode($row["bill_no"] ?? "-"); ?>,
-                <?php echo json_encode($row["payment_date"]); ?>
-            )' class="px-2 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-600 hover:text-white">
+                                            <?php echo json_encode($row["name"]); ?>,
+                                            <?php echo json_encode($row["stu_id"]); ?>,
+                                            <?php echo json_encode(number_format($row["amount"], 2)); ?>,
+                                            <?php echo json_encode($row["method"]); ?>,
+                                            <?php echo json_encode($row["bill_no"] ?? "-"); ?>,
+                                            <?php echo json_encode($row["payment_date"]); ?>
+                                        )' class="px-2 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-600 hover:text-white">
                                             Print
                                         </button>
                                     </td>
@@ -450,105 +622,105 @@ include '../Categories/header.php';
                         </tbody>
                     </table>
                 </div>
-        </div>
-    </div>
-
-    <div id="student_button" class="show_hide" style="display: none;">
-
-        <div class="justify-between hidden md:flex items-center mb-4">
-            <h1 class="font-bold text-3xl md:text-4xl">Student List Overview</h1>
-            <div class="relative w-1/2">
-                <i class="fa-solid fa-magnifying-glass absolute right-3 top-4 text-gray-400"></i>
-                <input
-                    id="searchDesktop"
-                    type="text"
-                    placeholder="Search student id or name..."
-                    class="form-control w-full py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:outline-none">
             </div>
         </div>
 
-        <div class="block md:hidden mb-4 mt-5">
-            <h1 class="font-bold text-3xl">Student List Overview</h1>
-            <p class="text-sm text-slate-500 mt-1 mb-3">Check student list to see student payments.</p>
-            <div class="relative">
-                <i class="fa-solid fa-magnifying-glass absolute right-3 top-3 text-gray-400"></i>
-                <input id="searchMobile" class="form-control w-full pr-10" type="text" placeholder="Search student id or name...">
-            </div>
-        </div>
+        <div id="student_button" class="show_hide" style="display: none;">
 
-        <div class="grid grid-cols-1 gap-6 mb-10">
-            <div class="bg-blue-200 gap-3 grid grid-cols-2 md:grid-cols-4 p-4 rounded-lg">
-                <div class="flex flex-col">
-                    <select id="filterFaculty" class="p-2 border rounded bg-white">
-                        <option value="Faculty">Faculty</option>
-                        <option value="Engineering">Engineering</option>
-                        <option value="Science">Science</option>
-                        <option value="Education">Education</option>
-                    </select>
-                </div>
-                <div class="flex flex-col">
-                    <select id="filterDepartment" class="p-2 border rounded bg-white">
-                        <option value="Department">Department</option>
-                        <option value="ITE">ITE</option>
-                        <option value="CS">CS</option>
-                        <option value="IBM">IBM</option>
-                        <option value="IT">IT</option>
-                    </select>
-                </div>
-                <div class="flex flex-col">
-                    <select id="filterYear" class="p-2 border rounded bg-white">
-                        <option value="Year">Years</option>
-                        <option value="1">Year 1</option>
-                        <option value="2">Year 2</option>
-                        <option value="3">Year 3</option>
-                        <option value="4">Year 4</option>
-                    </select>
-                </div>
-                <div class="flex flex-col">
-                    <select id="filterClass" class="p-2 border rounded bg-white">
-                        <option value="Class">Class</option>
-                        <option value="A1">A1</option>
-                        <option value="A2">A2</option>
-                        <option value="A3">A3</option>
-                        <option value="A4">A4</option>
-                        <option value="M1">M1</option>
-                        <option value="M2">M2</option>
-                        <option value="M3">M3</option>
-                        <option value="M4">M4</option>
-                        <option value="E1">E1</option>
-                        <option value="E2">E2</option>
-                        <option value="E3">E3</option>
-                        <option value="E4">E4</option>
-                    </select>
+            <div class="justify-between hidden md:flex items-center mb-4">
+                <h1 class="font-bold text-3xl md:text-4xl">Student List Overview</h1>
+                <div class="relative w-1/2">
+                    <i class="fa-solid fa-magnifying-glass absolute right-3 top-4 text-gray-400"></i>
+                    <input
+                        id="searchDesktop"
+                        type="text"
+                        placeholder="Search student id or name..."
+                        class="form-control w-full py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:outline-none">
                 </div>
             </div>
 
-            <div class="">
-                <button onclick="openModal()" class="btn btn-outline-primary float-end">+ Add Student</button>
+            <div class="block md:hidden mb-4 mt-5">
+                <h1 class="font-bold text-3xl">Student List Overview</h1>
+                <p class="text-sm text-slate-500 mt-1 mb-3">Check student list to see student payments.</p>
+                <div class="relative">
+                    <i class="fa-solid fa-magnifying-glass absolute right-3 top-3 text-gray-400"></i>
+                    <input id="searchMobile" class="form-control w-full pr-10" type="text" placeholder="Search student id or name...">
+                </div>
             </div>
-        </div>
 
-        <div class="bg-white p-4 rounded-xl shadow overflow-hidden">
-            <div class="w-full h-[500px] overflow-x-auto border border-gray-100 rounded-lg">
-                <table id="studentTable" class="table table-hover w-max min-w-full">
-                    <thead class="table-primary text-center">
-                        <tr>
-                            <th class="px-4 py-2 whitespace-nowrap">ID</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Student ID</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Name</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Gender</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Email</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Faculty</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Department</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Year</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Class</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Created</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        $select = "
+            <div class="grid grid-cols-1 gap-6 mb-10">
+                <div class="bg-blue-200 gap-3 grid grid-cols-2 md:grid-cols-4 p-4 rounded-lg">
+                    <div class="flex flex-col">
+                        <select id="filterFaculty" class="p-2 border rounded bg-white">
+                            <option value="Faculty">Faculty</option>
+                            <option value="Engineering">Engineering</option>
+                            <option value="Science">Science</option>
+                            <option value="Education">Education</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col">
+                        <select id="filterDepartment" class="p-2 border rounded bg-white">
+                            <option value="Department">Department</option>
+                            <option value="ITE">ITE</option>
+                            <option value="CS">CS</option>
+                            <option value="IBM">IBM</option>
+                            <option value="IT">IT</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col">
+                        <select id="filterYear" class="p-2 border rounded bg-white">
+                            <option value="Year">Years</option>
+                            <option value="1">Year 1</option>
+                            <option value="2">Year 2</option>
+                            <option value="3">Year 3</option>
+                            <option value="4">Year 4</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col">
+                        <select id="filterClass" class="p-2 border rounded bg-white">
+                            <option value="Class">Class</option>
+                            <option value="A1">A1</option>
+                            <option value="A2">A2</option>
+                            <option value="A3">A3</option>
+                            <option value="A4">A4</option>
+                            <option value="M1">M1</option>
+                            <option value="M2">M2</option>
+                            <option value="M3">M3</option>
+                            <option value="M4">M4</option>
+                            <option value="E1">E1</option>
+                            <option value="E2">E2</option>
+                            <option value="E3">E3</option>
+                            <option value="E4">E4</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="">
+                    <button onclick="openModal('student')" class="btn btn-outline-primary float-end">+ Add Student</button>
+                </div>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl shadow overflow-hidden">
+                <div class="w-full h-[500px] overflow-x-auto border border-gray-100 rounded-lg">
+                    <table id="studentTable" class="table table-hover w-max min-w-full">
+                        <thead class="table-primary text-center">
+                            <tr>
+                                <th class="px-4 py-2 whitespace-nowrap">ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Student ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Name</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Gender</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Email</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Faculty</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Department</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Year</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Class</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Created</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            $select = "
                                 SELECT 
                                     s.id,
                                     s.stu_id,
@@ -565,10 +737,10 @@ include '../Categories/header.php';
                                 LEFT JOIN tbl_class c ON s.class_id = c.id
                             ";
 
-                        $ex = $conn->query($select);
+                            $ex = $conn->query($select);
 
-                        while ($row = mysqli_fetch_assoc($ex)) {
-                            echo "
+                            while ($row = mysqli_fetch_assoc($ex)) {
+                                echo "
                                     <tr class='text-center border-b hover:bg-gray-50'>
                                         <td class='px-4 py-2 whitespace-nowrap'>{$row['id']}</td>
                                         <td class='px-4 py-2 whitespace-nowrap'>{$row['stu_id']}</td>
@@ -589,88 +761,159 @@ include '../Categories/header.php';
                                                 <button onclick=\"viewStudent(" . $row['id'] . ")\" class='px-2 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-600 hover:text-white'>
                                                     View
                                                 </button>
-                                                <button class='px-2 py-1 text-red-600 border border-red-600 rounded hover:bg-red-600 hover:text-white'>
-                                                    Delete
-                                                </button>
+                                                <form method='POST' action='../Components/delete_record.php' data-delete-type='student' data-delete-label='" . htmlspecialchars($row['name'], ENT_QUOTES, 'UTF-8') . "' onsubmit=\"return window.openDeleteConfirm ? openDeleteConfirm(this) : confirm('Are you sure?');\" class='inline'>
+                                                    <input type='hidden' name='delete_action' value='student'>
+                                                    <input type='hidden' name='delete_id' value='" . (int) $row['id'] . "'>
+                                                    <button type='submit' class='px-2 py-1 text-red-600 border border-red-600 rounded hover:bg-red-600 hover:text-white'>
+                                                        Delete
+                                                    </button>
+                                                </form>
                                             </div>
                                         </td>
                                     </tr>
                                 ";
-                        }
-                        ?>
-                    </tbody>
-                </table>
+                            }
+                            ?>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
-    </div>
 
-    <div id="class_button" class="show_hide" style="display: none;">
-        <div class="justify-between items-center mb-5">
-            <h1 class="text-4xl font-bold">Class Management</h1>
-            <p class="text-sm text-slate-500">Manage your classes here</p>
-            <button onclick="openModalClass()" class="bg-blue-600 focus:outline-none float-end hover:bg-blue-500 text-white px-4 py-2 rounded-lg">
-                <i class="fa-solid fa-plus mr-2"></i> Add Class
-            </button>
-        </div>
+        <div id="class_button" class="show_hide" style="display: none;">
+            <div class="justify-between items-center mb-5">
+                <h1 class="text-3xl font-bold">Class Management</h1>
+                <p class="text-sm text-slate-500">Manage and organize classes to find students easily</p>
+                <button onclick="openModalClass()" class="bg-blue-600 focus:outline-none relative bottom-11 float-end hover:bg-blue-500 text-white px-4 py-2 rounded-lg">
+                    <i class="fa-solid fa-plus mr-2"></i> Add Class
+                </button>
+            </div>
 
-        <div class="bg-white p-4 rounded-xl shadow">
-            <h2 class="text-2xl font-bold text-gray-800 mb-4">Class List</h2>
-            <div class="overflow-x-auto">
-                <table class="table table-hover w-full">
-                    <thead class="table-primary text-center">
-                        <tr>
-                            <th class="p-3">ID</th>
-                            <th class="p-3">Class Name</th>
-                            <th class="p-3">Faculty</th>
-                            <th class="p-3">Department</th>
-                            <th class="p-3">Year</th>
-                            <th class="p-3">Total Fee</th>
-                            <th class="p-3">Created At</th>
-                            <th class="p-3">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        // តភ្ជាប់ Database
-                        include '../Components/connection.php';
-                        $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : 0;
+            <?php
+            $classStats = $conn->query("
+            SELECT
+                (SELECT COUNT(*) FROM tbl_class) AS total_class,
+                (SELECT COUNT(DISTINCT department) FROM tbl_class) AS total_department,
+                (SELECT COUNT(*) FROM tbl_faculty) AS total_faculty,
+                (SELECT COUNT(*) FROM tbl_student) AS total_student
+        ")->fetch_assoc();
+            ?>
 
-                        // Select ទិន្នន័យពី tbl_class (តម្រៀបតាម ID ធំមកតូច)
-                        $select_class = "
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow px-4 py-3">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Total Class</p>
+                            <h3 class="text-2xl font-black text-slate-900 mt-1 leading-none"><?php echo number_format((int)($classStats['total_class'] ?? 0)); ?></h3>
+                        </div>
+                        <div class="h-10 w-10 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-lg shrink-0">
+                            <i class="fa-solid fa-building-columns"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow px-4 py-3">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Faculty</p>
+                            <h3 class="text-2xl font-black text-slate-900 mt-1 leading-none"><?php echo number_format((int)($classStats['total_faculty'] ?? 0)); ?></h3>
+                        </div>
+                        <div class="h-10 w-10 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center text-lg shrink-0">
+                            <i class="fa-solid fa-university"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow px-4 py-3">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Department</p>
+                            <h3 class="text-2xl font-black text-slate-900 mt-1 leading-none"><?php echo number_format((int)($classStats['total_department'] ?? 0)); ?></h3>
+                        </div>
+                        <div class="h-10 w-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg shrink-0">
+                            <i class="fa-solid fa-sitemap"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow px-4 py-3">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Total Student</p>
+                            <h3 class="text-2xl font-black text-slate-900 mt-1 leading-none"><?php echo number_format((int)($classStats['total_student'] ?? 0)); ?></h3>
+                        </div>
+                        <div class="h-10 w-10 rounded-2xl bg-pink-50 text-pink-600 flex items-center justify-center text-lg shrink-0">
+                            <i class="fa-solid fa-users"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl shadow">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Class List</h2>
+                <div class="overflow-x-auto">
+                    <table class="table table-hover w-full">
+                        <thead class="table-primary text-center">
+                            <tr>
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Class Name</th>
+                                <th class="p-3">Faculty</th>
+                                <th class="p-3">Department</th>
+                                <th class="p-3">Year</th>
+                                <th class="p-3">Total Fee</th>
+                                <th class="p-3">Created At</th>
+                                <th class="p-3">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            // តភ្ជាប់ Database
+                            include '../Components/connection.php';
+                            $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : 0;
+
+                            // Select ទិន្នន័យពី tbl_class (តម្រៀបតាម ID ធំមកតូច)
+                            $select_class = "
                                 SELECT 
                                     c.*, 
+                                    COALESCE(tf.faculty_name, c.faculty) AS faculty_display,
                                     f.total_fee 
                                 FROM tbl_class c
-                                LEFT JOIN tbl_fee f ON c.department = f.department 
+                                LEFT JOIN tbl_faculty tf ON c.faculty_id = tf.id
+                                LEFT JOIN (
+                                    SELECT faculty_id, department, MAX(id) AS fee_id
+                                    FROM tbl_fee
+                                    GROUP BY faculty_id, department
+                                ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+                                LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
                                 ORDER BY c.id
                             ";
-                        $ex_class = $conn->query($select_class);
+                            $ex_class = $conn->query($select_class);
 
-                        if ($ex_class->num_rows > 0) {
-                            while ($row = mysqli_fetch_assoc($ex_class)) {
-                                // កំណត់ពណ៌តាមឆ្នាំ (Option)
-                                $yearBadge = "";
-                                switch ($row['year']) {
-                                    case 1:
-                                        $yearBadge = "bg-blue-100 text-blue-700";
-                                        break;
-                                    case 2:
-                                        $yearBadge = "bg-green-100 text-green-700";
-                                        break;
-                                    case 3:
-                                        $yearBadge = "bg-yellow-100 text-yellow-700";
-                                        break;
-                                    case 4:
-                                        $yearBadge = "bg-purple-100 text-purple-700";
-                                        break;
-                                    default:
-                                        $yearBadge = "bg-gray-100";
-                                }
+                            if ($ex_class->num_rows > 0) {
+                                while ($row = mysqli_fetch_assoc($ex_class)) {
+                                    // កំណត់ពណ៌តាមឆ្នាំ (Option)
+                                    $yearBadge = "";
+                                    switch ($row['year']) {
+                                        case 1:
+                                            $yearBadge = "bg-blue-100 text-blue-700";
+                                            break;
+                                        case 2:
+                                            $yearBadge = "bg-green-100 text-green-700";
+                                            break;
+                                        case 3:
+                                            $yearBadge = "bg-yellow-100 text-yellow-700";
+                                            break;
+                                        case 4:
+                                            $yearBadge = "bg-purple-100 text-purple-700";
+                                            break;
+                                        default:
+                                            $yearBadge = "bg-gray-100";
+                                    }
 
-                                echo "<tr class='text-center align-middle border-b'>
+                                    echo "<tr class='text-center align-middle border-b'>
                                     <td class='p-3'>{$row['id']}</td>
                                     <td class='p-3 font-bold text-blue-600'>{$row['class_name']}</td>
-                                    <td class='p-3'>{$row['faculty']}</td>
+                                    <td class='p-3'>{$row['faculty_display']}</td>
                                     <td class='p-3'>{$row['department']}</td>
                                     <td class='p-3'>
                                         <span class='px-3 py-1 rounded-full text-xs font-semibold {$yearBadge}'>
@@ -684,127 +927,273 @@ include '../Categories/header.php';
                                             <button onclick=\"viewClass(" . $row['id'] . ")\" class=' text-blue-600 hover:text-blue-800' title='View students in class'>
                                                 <i class='fa-solid fa-pen-to-square'></i>
                                             </button>
-                                            <button class='text-red-600 hover:text-red-800' title='Delete'>
-                                                <i class='fa-solid fa-trash'></i>
-                                            </button>
+                                            <form method='POST' action='../Components/delete_record.php' data-delete-type='class' data-delete-label='" . htmlspecialchars($row['class_name'], ENT_QUOTES, 'UTF-8') . "' onsubmit=\"return window.openDeleteConfirm ? openDeleteConfirm(this) : confirm('Are you sure?');\" class='inline'>
+                                                <input type='hidden' name='delete_action' value='class'>
+                                                <input type='hidden' name='delete_id' value='" . (int) $row['id'] . "'>
+                                                <button type='submit' class='text-red-600 hover:text-red-800' title='Delete'>
+                                                    <i class='fa-solid fa-trash'></i>
+                                                </button>
+                                            </form>
                                         </div>
                                     </td>
                                   </tr>";
+                                }
+                            } else {
+                                echo "<tr><td colspan='7' class='text-center p-5 text-gray-500'>No classes found.</td></tr>";
                             }
-                        } else {
-                            echo "<tr><td colspan='7' class='text-center p-5 text-gray-500'>No classes found.</td></tr>";
-                        }
-                        ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-
-
-    <div id="setting_button" class="show_hide" style="display: none;">
-        <h1 class="text-2xl font-bold">Settings</h1>
-        <div class="bg-white p-5 rounded-lg shadow mt-4">
-            <p>Please set your favorite in my UI Website....</p>
-        </div>
-    </div>
-    <?php
-    $select_class = "
-                SELECT COUNT(*) as total_students
-                FROM tbl_student 
-                WHERE class_id = '$class_id'
-            ";
-
-    $execute = $conn->query($select_class);
-    $datas = mysqli_fetch_assoc($execute);
-
-    $select_total_fee = "SELECT total_fee FROM tbl_fee WHERE class_id = '$class_id'";
-    $run = $conn->query($select_total_fee);
-    $datass = mysqli_fetch_assoc($run);
-    ?>
-
-    <div id="page_class" class="show_hide" style="display:none;">
-        <h1 class="text-4xl fw-bold">Student List</h1>
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
-
-            <div class="relative overflow-hidden bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm font-medium text-slate-500">Total Students</p>
-                        <h3 class="text-3xl font-black text-slate-800 mt-1">
-                            <?php echo number_format($datas['total_students']); ?>
-                        </h3>
-                    </div>
-                    <div class="h-12 w-12 bg-blue-50 rounded-xl flex items-center justify-center">
-                        <i class="fa-solid fa-users text-blue-600 text-xl"></i>
-                    </div>
+                            ?>
+                        </tbody>
+                    </table>
                 </div>
-                <div class="absolute bottom-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-cyan-400"></div>
+            </div>
+        </div>
+
+
+
+        <div id="setting_button" class="show_hide" style="display: none;">
+            <div class="mb-6">
+                <h1 class="text-3xl font-bold text-slate-900">Settings</h1>
+                <p class="mt-2 text-sm text-slate-500 max-w-2xl">Manage dashboard preferences, contact details, and notification behavior from one place.</p>
             </div>
 
-            <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm font-medium text-slate-500">Academic Status</p>
-                        <div class="flex items-center gap-2 mt-2">
-                            <span class="flex h-3 w-3 rounded-full bg-green-500 animate-pulse"></span>
-                            <h3 class="text-xl font-bold text-slate-800">Active Now</h3>
+            <div class="grid grid-cols-1 xl:grid-cols-1 gap-5">
+
+                <div class="xl:col-span-2 space-y-5">
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <p class="text-sm text-slate-500">Notifications</p>
+                                <h2 class="text-xl font-bold text-slate-900">Notification Preferences</h2>
+                            </div>
+                            <div class="h-12 w-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-lg">
+                                <i class="fa-solid fa-bell"></i>
+                            </div>
+                        </div>
+                        <p class="text-sm text-slate-500 mb-5">Choose how the dashboard alerts you about payments and system activity.</p>
+
+                        <div class="space-y-3">
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">Email notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Receive reports and account updates by email.</p>
+                                </div>
+                                <input type="checkbox" checked class="h-5 w-5 accent-blue-600">
+                            </label>
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">Push notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Get real-time alerts on your device.</p>
+                                </div>
+                                <input type="checkbox" class="h-5 w-5 accent-blue-600">
+                            </label>
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">SMS notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Receive critical security alerts via SMS.</p>
+                                </div>
+                                <input type="checkbox" class="h-5 w-5 accent-blue-600">
+                            </label>
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">In-app notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Show alerts inside the application.</p>
+                                </div>
+                                <input type="checkbox" checked class="h-5 w-5 accent-blue-600">
+                            </label>
                         </div>
                     </div>
-                    <div class="h-12 w-12 bg-green-50 rounded-xl flex items-center justify-center">
-                        <i class="fa-solid fa-graduation-cap text-green-600 text-xl"></i>
-                    </div>
-                </div>
-            </div>
 
-            <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm font-medium text-slate-500">Total Fee in Class</p>
-                        <div class="flex items-center gap-2 mt-2">
-                            <h1 class="text-3xl font-black text-slate-800 mt-1">$<?php echo number_format($datas['total_students'] * $datass['total_fee']); ?></h1>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <p class="text-sm text-slate-500">Authentication</p>
+                                    <h2 class="text-xl font-bold text-slate-900">Details</h2>
+                                </div>
+                                <div class="h-12 w-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg">
+                                    <i class="fa-solid fa-shield-halved"></i>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Email Address</label>
+                                    <input type="email" value="admin@rupppay.com" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Mobile Number</label>
+                                    <input type="text" value="+855 12 345 678" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <p class="text-sm text-slate-500">Appearance</p>
+                                    <h2 class="text-xl font-bold text-slate-900">Workspace</h2>
+                                </div>
+                                <div class="h-12 w-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center text-lg">
+                                    <i class="fa-solid fa-palette"></i>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Default language</label>
+                                    <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                        <option>English</option>
+                                        <option>Khmer</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Receipt layout</label>
+                                    <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                        <option>Centered modal</option>
+                                        <option>Right panel</option>
+                                    </select>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div class="h-12 w-12 bg-green-50 rounded-xl flex items-center justify-center">
-                        <i class="fa-solid fa-coins text-yellow-600 text-xl"></i>
+
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <p class="text-sm text-slate-500 flex items-center gap-2">
+                                    <i class="fa-solid fa-wand-magic-sparkles text-slate-400"></i>
+                                    Action
+                                </p>
+                                <h2 class="text-xl font-bold text-slate-900">Save Settings</h2>
+                            </div>
+                            <div class="h-12 w-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-lg shadow-sm">
+                                <i class="fa-solid fa-sliders"></i>
+                            </div>
+                        </div>
+
+                        <p class="text-sm text-slate-500 mb-4 max-w-2xl">
+                            Save your dashboard preferences or reset them back to the default layout.
+                        </p>
+
+                        <div class="flex flex-wrap gap-3">
+                            <button type="button" class="px-5 py-3 rounded-xl bg-slate-900 text-white font-semibold hover:bg-slate-800 inline-flex items-center gap-2">
+                                <i class="fa-solid fa-floppy-disk"></i>
+                                Save Changes
+                            </button>
+                            <button type="button" class="px-5 py-3 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50 inline-flex items-center gap-2">
+                                <i class="fa-solid fa-rotate-left"></i>
+                                Reset
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
-
         </div>
-        <div class="grid mt-5 mb-10">
-            <div class="">
-                <button onclick="openModal()" class="btn btn-outline-primary float-end">+ Add Student</button>
+        <?php
+        $select_class = "
+            SELECT COUNT(*) as total_students
+            FROM tbl_student 
+            WHERE class_id = '$class_id'
+        ";
+
+        $execute = $conn->query($select_class);
+        $datas = mysqli_fetch_assoc($execute);
+
+        $select_total_fee = "
+            SELECT COALESCE(f.total_fee, 0) AS total_fee
+            FROM tbl_class c
+            LEFT JOIN (
+                SELECT faculty_id, department, MAX(id) AS fee_id
+                FROM tbl_fee
+                GROUP BY faculty_id, department
+            ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+            LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
+            WHERE c.id = '$class_id'
+            LIMIT 1
+        ";
+        $run = $conn->query($select_total_fee);
+        $datass = mysqli_fetch_assoc($run);
+        ?>
+
+        <div id="page_class" class="show_hide" style="display:none;">
+            <h1 class="text-4xl fw-bold">Student List</h1>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
+
+                <div class="relative overflow-hidden bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Total Students</p>
+                            <h3 class="text-3xl font-black text-slate-800 mt-1">
+                                <?php echo number_format($datas['total_students']); ?>
+                            </h3>
+                        </div>
+                        <div class="h-12 w-12 bg-blue-50 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-users text-blue-600 text-xl"></i>
+                        </div>
+                    </div>
+                    <div class="absolute bottom-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-cyan-400"></div>
+                </div>
+
+                <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Academic Status</p>
+                            <div class="flex items-center gap-2 mt-2">
+                                <span class="flex h-3 w-3 rounded-full bg-green-500 animate-pulse"></span>
+                                <h3 class="text-xl font-bold text-slate-800">Active Now</h3>
+                            </div>
+                        </div>
+                        <div class="h-12 w-12 bg-green-50 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-graduation-cap text-green-600 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm font-medium text-slate-500">Total Fee in Class</p>
+                            <div class="flex items-center gap-2 mt-2">
+                                <h1 class="text-3xl font-black text-slate-800 mt-1">$<?php echo number_format((int) ($datas['total_students'] ?? 0) * (float) ($datass['total_fee'] ?? 0)); ?></h1>
+                            </div>
+                        </div>
+                        <div class="h-12 w-12 bg-green-50 rounded-xl flex items-center justify-center">
+                            <i class="fa-solid fa-coins text-yellow-600 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+
             </div>
-        </div>
+            <div class="grid mt-5 mb-10">
+                <div class="">
+                    <button onclick="openModal('class')" class="btn btn-outline-primary float-end">+ Add Student</button>
+                </div>
+            </div>
 
-        <div class="bg-white p-4 rounded-xl shadow overflow-hidden">
-            <div class="w-full h-[500px] overflow-x-auto border border-gray-100 rounded-lg">
-                <table id="studentTable" class="table table-hover w-max min-w-full">
-                    <thead class="table-primary text-center">
-                        <tr>
-                            <th class="px-4 py-2 whitespace-nowrap">ID</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Student ID</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Name</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Gender</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Email</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Faculty</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Department</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Year</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Class</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Created</th>
-                            <th class="px-4 py-2 whitespace-nowrap">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        include '../Components/connection.php';
+            <div class="bg-white p-4 rounded-xl shadow overflow-hidden">
+                <div class="w-full h-[500px] overflow-x-auto border border-gray-100 rounded-lg">
+                    <table id="studentTable" class="table table-hover w-max min-w-full">
+                        <thead class="table-primary text-center">
+                            <tr>
+                                <th class="px-4 py-2 whitespace-nowrap">ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Student ID</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Name</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Gender</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Email</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Faculty</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Department</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Year</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Class</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Created</th>
+                                <th class="px-4 py-2 whitespace-nowrap">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            include '../Components/connection.php';
 
-                        $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : 0;
-                        $student_id = isset($_GET['student_id']) ? $_GET['student_id'] : 0;
+                            $class_id = isset($_GET['class_id']) ? $_GET['class_id'] : 0;
+                            $student_id = isset($_GET['student_id']) ? $_GET['student_id'] : 0;
 
-                        $selects = "
+                            $selects = "
                                 SELECT 
                                     s.id,
                                     s.stu_id,
@@ -821,10 +1210,10 @@ include '../Categories/header.php';
                                 WHERE s.class_id = '$class_id'
                             ";
 
-                        $exe = $conn->query($selects);
+                            $exe = $conn->query($selects);
 
-                        while ($row = mysqli_fetch_assoc($exe)) {
-                            echo "
+                            while ($row = mysqli_fetch_assoc($exe)) {
+                                echo "
                                     <tr class='text-center border-b hover:bg-gray-50'>
                                         <td class='px-4 py-2 whitespace-nowrap'>{$row['id']}</td>
                                         <td class='px-4 py-2 whitespace-nowrap'>{$row['stu_id']}</td>
@@ -845,161 +1234,203 @@ include '../Categories/header.php';
                                                 <button onclick=\"viewStudent(" . $row['id'] . ")\" class='px-2 py-1 text-blue-600 border border-blue-600 rounded hover:bg-blue-600 hover:text-white'>
                                                     View
                                                 </button>
-                                                <button class='px-2 py-1 text-red-600 border border-red-600 rounded hover:bg-red-600 hover:text-white'>
-                                                    Delete
-                                                </button>
+                                                <form method='POST' action='../Components/delete_record.php' data-delete-type='student' data-delete-label='" . htmlspecialchars($row['name'], ENT_QUOTES, 'UTF-8') . "' onsubmit=\"return window.openDeleteConfirm ? openDeleteConfirm(this) : confirm('Are you sure?');\" class='inline'>
+                                                    <input type='hidden' name='delete_action' value='student'>
+                                                    <input type='hidden' name='delete_id' value='" . (int) $row['id'] . "'>
+                                                    <button type='submit' class='px-2 py-1 text-red-600 border border-red-600 rounded hover:bg-red-600 hover:text-white'>
+                                                        Delete
+                                                    </button>
+                                                </form>
                                             </div>
                                         </td>
                                     </tr>
                                 ";
-                        }
-                        ?>
-                    </tbody>
-                </table>
+                            }
+                            ?>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
-</div>
 
 
-<div id="payment_page" class="show_hide relative mt-1 right-12" style="display:none;">
-    <div class="w-full space-y-6 mx-3">
-        <?php if ($paymentStudent): ?>
+    <div id="payment_page" class="show_hide relative mt-1 right-12" style="display:none;">
+        <div class="w-full space-y-6 mx-3">
+            <?php if ($paymentStudent): ?>
 
-            <!-- HEADER -->
-            <div class=" text-black p-6 rounded-2xl shadow-lg flex justify-between items-center">
-                <div>
-                    <h1 class="text-3xl font-bold">Student Payment</h1>
-                    <p class="text-sm text-gray-500 mt-2 opacity-90">Secure & fast payment system</p>
-                </div>
-                <div class="text-right">
-                    <i class="fa-solid fa-qrcode text-5xl mr-3"></i>
-                </div>
-            </div>
-
-            <!-- MAIN GRID -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-                <!-- LEFT: STUDENT PROFILE -->
-                <div class="bg-white rounded-2xl shadow p-6 col-span-2">
-
-                    <h2 class="text-xl font-bold mb-4 border-b pb-2"><i class="fa-solid fa-user-graduate mr-1 text-gray-600"></i> Student Info</h2>
-
-                    <div class="flex items-center gap-5 mb-6">
-                        <div class="w-16 h-16 bg-blue-500 text-white flex items-center justify-center rounded-full text-xl font-bold">
-                            <?php echo strtoupper(substr($paymentStudent['name'], 0, 1)); ?>
-                        </div>
-                        <div>
-                            <p class="text-xl font-semibold"><?php echo htmlspecialchars($paymentStudent['name']); ?></p>
-                            <p class="text-gray-500 text-sm"><?php echo htmlspecialchars($paymentStudent['email']); ?></p>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 gap-4 text-gray-700 text-sm">
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Student ID</p>
-                            <p class="font-semibold text-blue-600"><?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
-                        </div>
-
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Class</p>
-                            <p class="font-semibold text-amber-600"><?php echo htmlspecialchars($paymentStudent['class_name'] ?? 'N/A'); ?></p>
-                        </div>
-
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Department</p>
-                            <p class="font-semibold text-red-600"><?php echo htmlspecialchars($paymentStudent['department'] ?? 'N/A'); ?></p>
-                        </div>
-
-                        <div class="bg-gray-50 p-3 rounded-lg">
-                            <p class="text-gray-500">Payment Type</p>
-                            <p class="font-semibold text-green-600">School Fee</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- RIGHT: PAYMENT BOX -->
-                <div class="bg-white rounded-2xl shadow p-6 flex flex-col justify-between">
-
+                <!-- HEADER -->
+                <div class=" text-black p-6 rounded-2xl shadow-lg flex justify-between items-center">
                     <div>
-                        <h2 class="text-xl font-bold mb-4 border-b pb-2">💰 Payment</h2>
+                        <h1 class="text-3xl font-bold">Student Payment</h1>
+                        <p class="text-sm text-gray-500 mt-2 opacity-90">Secure & fast payment system</p>
+                    </div>
+                    <div class="text-right">
+                        <i class="fa-solid fa-qrcode text-5xl mr-3"></i>
+                    </div>
+                </div>
 
-                        <div class="bg-blue-50 p-4 rounded-xl text-center mb-4">
-                            <p class="text-gray-500 text-sm">Total Fee</p>
-                            <p class="text-4xl font-bold text-blue-600 mt-1">
-                                $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?>
-                            </p>
+                <!-- MAIN GRID -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                    <!-- LEFT: STUDENT PROFILE -->
+                    <div class="bg-white rounded-2xl shadow p-6 col-span-2">
+
+                        <h2 class="text-xl font-bold mb-4 border-b pb-2"><i class="fa-solid fa-user-graduate mr-1 text-gray-600"></i> Student Info</h2>
+
+                        <div class="flex items-center gap-5 mb-6">
+                            <div class="w-16 h-16 bg-blue-500 text-white flex items-center justify-center rounded-full text-xl font-bold">
+                                <?php echo strtoupper(substr($paymentStudent['name'], 0, 1)); ?>
+                            </div>
+                            <div>
+                                <p class="text-xl font-semibold"><?php echo htmlspecialchars($paymentStudent['name']); ?></p>
+                                <p class="text-gray-500 text-sm"><?php echo htmlspecialchars($paymentStudent['email']); ?></p>
+                            </div>
                         </div>
 
-                        <div class="text-sm text-gray-500 mb-4">
-                            ✔ Includes all semester fees<br>
-                            ✔ One-time payment
+                        <div class="grid grid-cols-2 gap-4 text-gray-700 text-sm">
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Student ID</p>
+                                <p class="font-semibold text-blue-600"><?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
+                            </div>
+
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Class</p>
+                                <p class="font-semibold text-amber-600"><?php echo htmlspecialchars($paymentStudent['class_name'] ?? 'N/A'); ?></p>
+                            </div>
+
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Department</p>
+                                <p class="font-semibold text-red-600"><?php echo htmlspecialchars($paymentStudent['department'] ?? 'N/A'); ?></p>
+                            </div>
+
+                            <div class="bg-gray-50 p-3 rounded-lg">
+                                <p class="text-gray-500">Payment Type</p>
+                                <p class="font-semibold text-green-600">School Fee</p>
+                            </div>
                         </div>
                     </div>
 
-                    <!-- BUTTONS -->
-                    <div class="space-y-3">
-                        <button onclick="showQR(<?php echo (int) $paymentStudent['id']; ?>, <?php echo (float) ($paymentStudent['total_fee'] ?? 0); ?>)"
-                            class="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-xl font-semibold shadow">
-                            Confirm Payment
-                        </button>
+                    <!-- RIGHT: PAYMENT BOX -->
+                    <div class="bg-white rounded-2xl shadow p-6 flex flex-col justify-between">
 
-                        <button onclick="showReceipt()"
-                            class="w-full bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-xl">
-                            🧾 Print Receipt
-                        </button>
+                        <div>
+                            <h2 class="text-xl font-bold mb-4 border-b pb-2">💰 Payment</h2>
+
+                            <div class="bg-blue-50 p-4 rounded-xl text-center mb-4">
+                                <p class="text-gray-500 text-sm">Total Fee</p>
+                                <p class="text-4xl font-bold text-blue-600 mt-1">
+                                    $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?>
+                                </p>
+                            </div>
+
+                            <div class="text-sm text-gray-500 mb-4">
+                                ✔ Includes all semester fees<br>
+                                ✔ Multiple payments allowed
+                            </div>
+                        </div>
+
+                        <!-- BUTTONS -->
+                        <div class="space-y-3">
+                            <button onclick="showQR(<?php echo (int) $paymentStudent['id']; ?>, <?php echo (float) ($paymentStudent['total_fee'] ?? 0); ?>)"
+                                class="w-full bg-green-600 hover:bg-green-500 text-white py-3 rounded-xl font-semibold shadow">
+                                Confirm Payment
+                            </button>
+
+                            <button onclick="showReceipt()"
+                                class="w-full bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-xl">
+                                🧾 Print Receipt
+                            </button>
+                        </div>
+
                     </div>
 
                 </div>
 
-            </div>
+                <!-- QR MODAL -->
+                <div id="qrModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center">
+                    <div class="bg-white p-6 rounded-xl text-center w-[350px]">
 
-            <!-- QR MODAL -->
-            <div id="qrModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center">
-                <div class="bg-white p-6 rounded-xl text-center w-[350px]">
+                        <h2 class="text-xl font-bold mb-4">Scan QR to Pay</h2>
 
-                    <h2 class="text-xl font-bold mb-4">Scan QR to Pay</h2>
+                        <!-- QR -->
+                        <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[220px] h-[220px] object-contain" />
 
-                    <!-- QR -->
-                    <img id="bakongQR" src="" alt="Payment QR Code" class="mx-auto w-[220px] h-[220px] object-contain" />
+                        <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
 
-                    <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
+                        <div class="mt-4 rounded-lg bg-blue-50 text-blue-700 px-4 py-3 text-sm">
+                            Waiting for payment confirmation...
+                        </div>
 
-                    <div class="mt-4 rounded-lg bg-blue-50 text-blue-700 px-4 py-3 text-sm">
-                        Waiting for payment confirmation...
+                        <button onclick="closeQRAuto()"
+                            class="mt-2 text-red-500">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+
+                <!-- RECEIPT -->
+                <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
+                    <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
+                    <p>Payer Name: <span id="payerName">-</span></p>
+                    <p>Payer Account: <span id="payerAccount">-</span></p>
+                    <p>Name: <?php echo htmlspecialchars($paymentStudent['name']); ?></p>
+                    <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
+                    <p>Amount: $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></p>
+                    <p>Receipt Code: <span id="receiptCode">-</span></p>
+                    <p>Date: <span id="payDate"></span></p>
+
+                    <div class="text-green-600 font-bold mt-4">
+                        ✔ Payment Successful
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl shadow p-6 mt-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-bold text-gray-800">All Receipts for This Student</h3>
+                        <span class="text-sm text-gray-500"><?php echo count($studentReceipts); ?> receipt(s)</span>
                     </div>
 
-                    <button onclick="closeQRAuto()"
-                        class="mt-2 text-red-500">
-                        Cancel
-                    </button>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="border-b text-gray-500 text-left">
+                                    <th class="py-2">Date</th>
+                                    <th>Amount</th>
+                                    <th>Bill No</th>
+                                    <th>Receipt No</th>
+                                    <th>Method</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!empty($studentReceipts)): ?>
+                                    <?php foreach ($studentReceipts as $receipt): ?>
+                                        <tr class="border-b">
+                                            <td class="py-2"><?php echo htmlspecialchars($receipt['payment_date'] ?? ''); ?></td>
+                                            <td>$<?php echo number_format((float) ($receipt['amount'] ?? 0), 2); ?></td>
+                                            <td><?php echo htmlspecialchars($receipt['bill_no'] ?? '-'); ?></td>
+                                            <td class="text-xs text-gray-500"><?php echo htmlspecialchars($receipt['receipt_code'] ?? '-'); ?></td>
+                                            <td><?php echo htmlspecialchars($receipt['method'] ?? 'Paid'); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <tr>
+                                        <td class="py-4 text-gray-500" colspan="5">No receipts found for this student yet.</td>
+                                    </tr>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
-
-            <!-- RECEIPT -->
-            <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
-                <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
-                <p>Payer Name: <span id="payerName">-</span></p>
-                <p>Payer Account: <span id="payerAccount">-</span></p>
-                <p>Name: <?php echo htmlspecialchars($paymentStudent['name']); ?></p>
-                <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id']); ?></p>
-                <p>Amount: $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></p>
-                <p>Receipt Code: <span id="receiptCode">-</span></p>
-                <p>Date: <span id="payDate"></span></p>
-
-                <div class="text-green-600 font-bold mt-4">
-                    ✔ Payment Successful
+            <?php elseif ($student_id > 0): ?>
+                <div class="bg-white rounded-2xl shadow p-6">
+                    <h2 class="text-xl font-bold mb-2">Student not found</h2>
+                    <p class="text-gray-500">The selected student could not be loaded for payment.</p>
                 </div>
-            </div>
-        <?php elseif ($student_id > 0): ?>
-            <div class="bg-white rounded-2xl shadow p-6">
-                <h2 class="text-xl font-bold mb-2">Student not found</h2>
-                <p class="text-gray-500">The selected student could not be loaded for payment.</p>
-            </div>
-        <?php endif; ?>
+            <?php endif; ?>
 
+        </div>
     </div>
-</div>
 </div>
 
 <!-- Modal add student -->
@@ -1013,7 +1444,7 @@ include '../Categories/header.php';
             <i class="fa-solid fa-xmark cursor-pointer" onclick="closeModal()"></i>
         </div>
 
-        <form action="../Components/insert_student.php" method="POST">
+        <form id="studentForm" action="../Components/insert_student.php" method="POST">
 
             <input type="text" name="stu_id" placeholder="Student ID"
                 class="w-full mb-3 px-3 py-2 border rounded-lg" required>
@@ -1033,8 +1464,20 @@ include '../Categories/header.php';
             <input type="text" name="password" placeholder="Password"
                 class="w-full mb-3 px-3 py-2 border rounded-lg" required>
 
-            <input type="number" name="class_id" placeholder="Class ID"
-                class="w-full mb-3 px-3 py-2 border rounded-lg">
+            <input id="modalClassId" type="hidden" name="class_id" value="<?php echo (int) $currentClassId; ?>">
+            <input id="modalReturnClass" type="hidden" name="return_class_id" value="">
+
+            <select id="modalClassSelect" name="selected_class_id" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                <option value="">Select Class</option>
+                <?php
+                $classOptions = $conn->query("SELECT id, class_name FROM tbl_class ORDER BY class_name ASC");
+                while ($classOptions && ($classOption = $classOptions->fetch_assoc())):
+                ?>
+                    <option value="<?php echo (int) $classOption['id']; ?>">
+                        <?php echo htmlspecialchars($classOption['class_name']); ?>
+                    </option>
+                <?php endwhile; ?>
+            </select>
 
             <div class="flex justify-end gap-2 mt-3">
                 <button type="button" onclick="closeModal()"
@@ -1063,7 +1506,7 @@ include '../Categories/header.php';
             <i class="fa-solid fa-xmark cursor-pointer" onclick="closeModalClass()"></i>
         </div>
 
-        <form action="../Components/insert_class.php" method="POST">
+        <form id="classForm" action="../Components/insert_class.php" method="POST">
             <div class="b-2">
                 <label for="" class="form-label fw-bold">Class Name</label>
                 <input type="text" name="class_name" placeholder="Class Name..."
@@ -1072,22 +1515,51 @@ include '../Categories/header.php';
 
             <div class="mb-2">
                 <label for="" class="form-label fw-bold">Faculty</label>
-                <select name="faculty" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                <select id="classFaculty" name="faculty_id" class="w-full mb-3 px-3 py-2 border rounded-lg" onchange="syncFacultyDepartments()">
                     <option value="">Select Faculty</option>
-                    <option value="Engineering">Engineering</option>
-                    <option value="Science">Science</option>
-                    <option value="Education">Education</option>
+                    <?php
+                    $facultyOptions = $conn->query("SELECT id, faculty_name FROM tbl_faculty ORDER BY faculty_name ASC");
+                    while ($facultyOptions && ($facultyOption = $facultyOptions->fetch_assoc())):
+                    ?>
+                        <option value="<?php echo (int) $facultyOption['id']; ?>">
+                            <?php echo htmlspecialchars($facultyOption['faculty_name']); ?>
+                        </option>
+                    <?php endwhile; ?>
                 </select>
             </div>
+            <?php
+            $departmentFeeOptions = $conn->query("
+                SELECT f.faculty_id, f.department, f.total_fee
+                FROM tbl_fee f
+                INNER JOIN (
+                    SELECT faculty_id, department, MAX(id) AS fee_id
+                    FROM tbl_fee
+                    WHERE faculty_id IS NOT NULL
+                        AND faculty_id > 0
+                        AND department IS NOT NULL
+                        AND department <> ''
+                        AND total_fee > 0
+                    GROUP BY faculty_id, department
+                ) latest_fee ON latest_fee.fee_id = f.id
+                ORDER BY f.faculty_id ASC, f.department ASC
+            ");
+            ?>
             <div class="mb-2">
                 <label for="" class="form-label fw-bold">Department</label>
-                <select name="department" class="w-full mb-3 px-3 py-2 border rounded-lg">
+                <select id="classDepartment" name="department" class="w-full mb-3 px-3 py-2 border rounded-lg" onchange="syncDepartmentFee()">
                     <option value="">Select Department</option>
-                    <option value="ITE">ITE</option>
-                    <option value="IT">IT</option>
-                    <option value="English">English</option>
-                    <option value="IBM">IBM</option>
-                    <option value="Math">Math</option>
+                    <?php if ($departmentFeeOptions && $departmentFeeOptions->num_rows > 0): ?>
+                        <?php while ($departmentFee = $departmentFeeOptions->fetch_assoc()): ?>
+                            <option
+                                value="<?php echo htmlspecialchars($departmentFee['department']); ?>"
+                                data-faculty-id="<?php echo (int) $departmentFee['faculty_id']; ?>"
+                                data-price="<?php echo htmlspecialchars((string) $departmentFee['total_fee']); ?>">
+                                <?php echo htmlspecialchars($departmentFee['department']); ?>
+                            </option>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <option value="" disabled>No department fee found</option>
+                    <?php endif; ?>
                 </select>
             </div>
             <div class="mb-2">
@@ -1103,7 +1575,7 @@ include '../Categories/header.php';
 
             <div class="mb-2">
                 <label for="" class="form-label fw-bold">Price Fee</label>
-                <input type="number" name="price" class="form-control" placeholder="Price fee..." required>
+                <input id="departmentFeeDisplay" type="text" class="form-control" placeholder="Choose department to load price" readonly>
             </div>
 
             <div class="flex justify-end gap-2 mt-3">
@@ -1120,6 +1592,37 @@ include '../Categories/header.php';
 
         </form>
 
+    </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="deleteModal"
+    class="fixed inset-0 z-[200] hidden items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+
+    <div class="w-full max-w-[470px] rounded-xl bg-white px-9 py-10 text-center shadow-2xl ring-1 ring-cyan-100">
+        <div class="mx-auto mb-7 flex h-12 w-12 items-center justify-center rounded-full bg-rose-50 text-rose-500">
+            <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+        </div>
+
+        <h2 class="text-2xl font-black text-slate-950">
+            Are you sure?
+        </h2>
+
+        <p id="deleteModalText" class="mx-auto mt-4 max-w-sm text-base leading-6 text-slate-400">
+            This action cannot be undone. All values associated with this field will be lost.
+        </p>
+
+        <div class="mt-7 space-y-4">
+            <button type="button" onclick="submitPendingDeleteForm()"
+                class="w-full rounded-md bg-rose-600 px-5 py-3.5 text-base font-bold text-white shadow-lg shadow-rose-100 transition hover:bg-rose-700">
+                Delete field
+            </button>
+
+            <button type="button" onclick="closeDeleteModal()"
+                class="w-full rounded-md border border-slate-200 bg-white px-5 py-3.5 text-base font-bold text-slate-800 transition hover:bg-slate-50">
+                Cancel
+            </button>
+        </div>
     </div>
 </div>
 
@@ -1236,24 +1739,145 @@ include '../Categories/header.php';
 
 
     // student modal
-    function openModal() {
+    function openModal(mode = 'student') {
+        const currentClassId = <?php echo (int) $currentClassId; ?>;
+        const classIdInput = document.getElementById('modalClassId');
+        const returnClassInput = document.getElementById('modalReturnClass');
+        const classSelect = document.getElementById('modalClassSelect');
+
+        if (mode === 'class' && currentClassId <= 0) {
+            alert('Please open a class first, then add the student.');
+            return;
+        }
+
+        if (mode === 'class') {
+            classIdInput.value = currentClassId;
+            returnClassInput.value = currentClassId;
+            classSelect.value = '';
+            classSelect.required = false;
+            classSelect.disabled = true;
+            classSelect.classList.add('hidden');
+        } else {
+            classIdInput.value = '';
+            returnClassInput.value = '';
+            classSelect.disabled = false;
+            classSelect.required = true;
+            classSelect.classList.remove('hidden');
+        }
+
         document.getElementById('studentModal').classList.remove('hidden');
         document.getElementById('studentModal').classList.add('flex');
     }
 
     function closeModal() {
+        const form = document.getElementById('studentForm');
+        if (form) {
+            form.reset();
+        }
+
         document.getElementById('studentModal').classList.add('hidden');
+        document.getElementById('studentModal').classList.remove('flex');
     }
 
     // class modal
     function openModalClass() {
         document.getElementById('classModal').classList.remove('hidden');
         document.getElementById('classModal').classList.add('flex');
+        syncFacultyDepartments();
     }
 
     function closeModalClass() {
+        const form = document.getElementById('classForm');
+        if (form) {
+            form.reset();
+        }
+
+        syncFacultyDepartments();
         document.getElementById('classModal').classList.add('hidden');
+        document.getElementById('classModal').classList.remove('flex');
     }
+
+    function syncFacultyDepartments() {
+        const facultySelect = document.getElementById('classFaculty');
+        const departmentSelect = document.getElementById('classDepartment');
+
+        if (!facultySelect || !departmentSelect) return;
+
+        const selectedFacultyId = facultySelect.value;
+        let hasVisibleDepartment = false;
+
+        Array.from(departmentSelect.options).forEach((option) => {
+            if (!option.value) {
+                option.hidden = false;
+                option.disabled = false;
+                return;
+            }
+
+            const matchesFaculty = selectedFacultyId !== '' && option.dataset.facultyId === selectedFacultyId;
+            option.hidden = !matchesFaculty;
+            option.disabled = !matchesFaculty;
+            if (matchesFaculty) {
+                hasVisibleDepartment = true;
+            }
+        });
+
+        if (!selectedFacultyId || departmentSelect.selectedOptions[0]?.disabled) {
+            departmentSelect.value = '';
+        }
+
+        departmentSelect.disabled = !selectedFacultyId || !hasVisibleDepartment;
+        syncDepartmentFee();
+    }
+
+    function syncDepartmentFee() {
+        const departmentSelect = document.getElementById('classDepartment');
+        const feeDisplay = document.getElementById('departmentFeeDisplay');
+
+        if (!departmentSelect || !feeDisplay) return;
+
+        const selectedOption = departmentSelect.options[departmentSelect.selectedIndex];
+        const price = selectedOption ? selectedOption.dataset.price : '';
+        feeDisplay.value = price ? `$${Number(price).toLocaleString()}` : '';
+    }
+
+    let pendingDeleteForm = null;
+
+    function openDeleteConfirm(form) {
+        pendingDeleteForm = form;
+        const modal = document.getElementById('deleteModal');
+        const text = document.getElementById('deleteModalText');
+        const typeLabel = form.dataset.deleteType === 'class' ? 'class' : 'student';
+        const label = form.dataset.deleteLabel || '';
+
+        text.textContent = `This action cannot be undone. All values associated with this ${typeLabel}${label ? ` (${label})` : ''} will be lost.`;
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        return false;
+    }
+
+    function closeDeleteModal() {
+        const modal = document.getElementById('deleteModal');
+        pendingDeleteForm = null;
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+    }
+
+    function submitPendingDeleteForm() {
+        if (!pendingDeleteForm) {
+            closeDeleteModal();
+            return;
+        }
+
+        pendingDeleteForm.removeAttribute('onsubmit');
+        pendingDeleteForm.submit();
+    }
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') {
+            closeDeleteModal();
+        }
+    });
+
     // for change page with button in sidear
     // Function សម្រាប់ប្តូរ Page និងដូរពណ៌ប៊ូតុង
     function showSection(id, btnElement) {
@@ -1664,6 +2288,23 @@ include '../Categories/header.php';
         Chart.defaults.font.size = 11;
         Chart.defaults.color = '#9ca3af';
         const gridColor = 'rgba(0,0,0,0.04)';
+        const overviewLabels = <?php echo json_encode($chartMonths); ?>;
+        const monthlyStudents = <?php echo json_encode($monthlyStudents); ?>;
+        const monthlyPayments = <?php echo json_encode($monthlyPayments); ?>;
+        const departmentLabels = <?php echo json_encode(array_map(static function ($row) {
+                                        return $row['department'] ?? 'Unknown';
+                                    }, $deptGenderStats)); ?>;
+        const girlsByDept = <?php echo json_encode(array_map(static function ($row) {
+                                return (int) ($row['girls'] ?? 0);
+                            }, $deptGenderStats)); ?>;
+        const boysByDept = <?php echo json_encode(array_map(static function ($row) {
+                                return (int) ($row['boys'] ?? 0);
+                            }, $deptGenderStats)); ?>;
+        const paymentCounts = <?php echo json_encode($paymentCounts); ?>;
+        const paidStudentCounts = <?php echo json_encode($paidStudentCounts); ?>;
+        const overviewMax = Math.max(10, ...monthlyStudents, ...monthlyPayments);
+        const genderMax = Math.max(10, ...girlsByDept, ...boysByDept);
+        const paymentMax = Math.max(10, ...paymentCounts, ...paidStudentCounts);
 
         // 1. Overview Line Chart
         const overviewCtx = overviewEl.getContext('2d');
@@ -1677,10 +2318,10 @@ include '../Categories/header.php';
         new Chart(overviewCtx, {
             type: 'line',
             data: {
-                labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'],
+                labels: overviewLabels,
                 datasets: [{
-                        label: 'Teacher',
-                        data: [45, 58, 72, 63, 40, 42, 30],
+                        label: 'New Students',
+                        data: monthlyStudents,
                         borderColor: '#2563eb',
                         backgroundColor: teacherGradient,
                         borderWidth: 2.5,
@@ -1693,8 +2334,8 @@ include '../Categories/header.php';
                         pointHoverBorderWidth: 2
                     },
                     {
-                        label: 'Student',
-                        data: [22, 38, 52, 30, 48, 45, 25],
+                        label: 'Payments',
+                        data: monthlyPayments,
                         borderColor: '#2dd4bf',
                         backgroundColor: studentGradient,
                         borderWidth: 2.5,
@@ -1743,8 +2384,8 @@ include '../Categories/header.php';
                         }
                     },
                     y: {
-                        min: 20,
-                        max: 80,
+                        min: 0,
+                        max: overviewMax,
                         grid: {
                             color: gridColor
                         },
@@ -1754,7 +2395,7 @@ include '../Categories/header.php';
                         },
                         ticks: {
                             color: '#9ca3af',
-                            stepSize: 10
+                            stepSize: Math.max(1, Math.ceil(overviewMax / 6))
                         }
                     }
                 }
@@ -1766,10 +2407,10 @@ include '../Categories/header.php';
         new Chart(studentsCtx, {
             type: 'bar',
             data: {
-                labels: ['CS', 'IT', 'BBA', 'Law', 'Eng', 'Sci', 'Med', 'Edu', 'Eco', 'Arch'],
+                labels: departmentLabels,
                 datasets: [{
                         label: 'Girls',
-                        data: [420, 590, 350, 510, 280, 470, 310, 300, 310, 420],
+                        data: girlsByDept,
                         backgroundColor: '#6366f1',
                         borderRadius: 5,
                         borderSkipped: false,
@@ -1778,7 +2419,7 @@ include '../Categories/header.php';
                     },
                     {
                         label: 'Boys',
-                        data: [480, 320, 460, 430, 370, 390, 280, 490, 420, 500],
+                        data: boysByDept,
                         backgroundColor: '#2dd4bf',
                         borderRadius: 5,
                         borderSkipped: false,
@@ -1823,7 +2464,7 @@ include '../Categories/header.php';
                     },
                     y: {
                         min: 0,
-                        max: 800,
+                        max: genderMax,
                         grid: {
                             color: gridColor
                         },
@@ -1832,7 +2473,7 @@ include '../Categories/header.php';
                         },
                         ticks: {
                             color: '#9ca3af',
-                            stepSize: 200
+                            stepSize: Math.max(1, Math.ceil(genderMax / 5))
                         }
                     }
                 }
@@ -1851,10 +2492,10 @@ include '../Categories/header.php';
         new Chart(paymentCtx, {
             type: 'line',
             data: {
-                labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+                labels: overviewLabels,
                 datasets: [{
                         label: 'Collected',
-                        data: [8200, 9400, 11200, 10500, 12800, 11600, 13200, 12400, 14100, 13800, 15200, 14900],
+                        data: paymentCounts,
                         borderColor: '#2563eb',
                         backgroundColor: collectedGrad,
                         borderWidth: 2.5,
@@ -1867,8 +2508,8 @@ include '../Categories/header.php';
                         pointHoverBorderWidth: 2
                     },
                     {
-                        label: 'Pending',
-                        data: [3100, 2800, 2200, 3400, 1800, 2600, 1500, 2100, 1200, 1800, 900, 1400],
+                        label: 'Paid students',
+                        data: paidStudentCounts,
                         borderColor: '#f87171',
                         backgroundColor: pendingGrad,
                         borderWidth: 2.5,
@@ -1903,7 +2544,7 @@ include '../Categories/header.php';
                         boxWidth: 8,
                         boxHeight: 8,
                         callbacks: {
-                            label: ctx => ` ${ctx.dataset.label}: $${ctx.parsed.y.toLocaleString()}`
+                            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()}`
                         }
                     }
                 },
@@ -1920,6 +2561,8 @@ include '../Categories/header.php';
                         }
                     },
                     y: {
+                        min: 0,
+                        max: paymentMax,
                         grid: {
                             color: gridColor
                         },
@@ -1928,7 +2571,8 @@ include '../Categories/header.php';
                         },
                         ticks: {
                             color: '#9ca3af',
-                            callback: v => '$' + (v / 1000).toFixed(0) + 'k'
+                            stepSize: Math.max(1, Math.ceil(paymentMax / 6)),
+                            callback: v => v.toLocaleString()
                         }
                     }
                 }

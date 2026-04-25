@@ -27,7 +27,9 @@ include '../Categories/header.php';
       <div class="hidden md:flex items-center gap-3">
         <?php
           // For Session code
-          session_start();
+          if (session_status() === PHP_SESSION_NONE) {
+              session_start();
+          }
           if (isset($_SESSION['is_admin'])) {
               echo '
                   <a href="../Components/logout.php" class="text-gray-100 hover:bg-red-400 bg-red-600 float-end no-underline px-4 py-2 rounded-lg font-medium cursor-pointer">Logout</a>

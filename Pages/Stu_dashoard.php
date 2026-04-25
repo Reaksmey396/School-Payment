@@ -23,7 +23,12 @@ $studentSql = "
         COALESCE(f.total_fee, 0) AS total_fee
     FROM tbl_student s
     LEFT JOIN tbl_class c ON s.class_id = c.id
-    LEFT JOIN tbl_fee f ON c.id = f.class_id
+    LEFT JOIN (
+        SELECT faculty_id, department, MAX(id) AS fee_id
+        FROM tbl_fee
+        GROUP BY faculty_id, department
+    ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+    LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
     WHERE s.email = ?
     LIMIT 1
 ";
@@ -39,6 +44,7 @@ $student_id = isset($_GET['student_id']) ? (int) $_GET['student_id'] : 0;
 $paymentStudent = $data;
 $totalPaid = 0.0;
 $recentPayments = [];
+$latestPayment = null;
 
 if ($data && !empty($data['id'])) {
     $currentStudentId = (int) $data['id'];
@@ -55,11 +61,12 @@ if ($data && !empty($data['id'])) {
     }
 
     $recentPaymentsStmt = $conn->prepare("
-        SELECT payment_date, amount, method
-        FROM tbl_payment
-        WHERE student_id = ?
-        ORDER BY payment_date DESC, id DESC
-        LIMIT 5
+        SELECT p.payment_date, p.amount, p.method, p.bill_no, r.receipt_code
+        FROM tbl_payment p
+        LEFT JOIN tbl_receipt r ON p.id = r.payment_id
+        WHERE p.student_id = ?
+        ORDER BY p.payment_date DESC, p.id DESC
+        LIMIT 10
     ");
     if ($recentPaymentsStmt) {
         $recentPaymentsStmt->bind_param("i", $currentStudentId);
@@ -70,6 +77,8 @@ if ($data && !empty($data['id'])) {
         }
         $recentPaymentsStmt->close();
     }
+
+    $latestPayment = $recentPayments[0] ?? null;
 }
 
 if (isset($_POST['pay'])) {
@@ -78,6 +87,7 @@ if (isset($_POST['pay'])) {
     $student_id = isset($_POST['student_id']) ? (int) $_POST['student_id'] : 0;
     $amount = isset($_POST['amount']) ? (float) $_POST['amount'] : 0;
     $method = isset($_POST['method']) ? trim($_POST['method']) : 'Bakong QR';
+    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : '';
 
     if ($student_id <= 0 || $amount <= 0) {
         echo json_encode([
@@ -87,9 +97,70 @@ if (isset($_POST['pay'])) {
         exit();
     }
 
+    if ($billNo !== '') {
+        $existingStmt = $conn->prepare("SELECT id FROM tbl_payment WHERE bill_no = ? LIMIT 1");
+        if ($existingStmt) {
+            $existingStmt->bind_param("s", $billNo);
+            $existingStmt->execute();
+            $existingRes = $existingStmt->get_result();
+            if ($existingRes && ($existingRow = $existingRes->fetch_assoc())) {
+                $existingPaymentId = (int) ($existingRow['id'] ?? 0);
+                $existingReceipt = '';
+                if ($existingPaymentId > 0) {
+                    $receiptStmt = $conn->prepare("SELECT receipt_code FROM tbl_receipt WHERE payment_id = ? LIMIT 1");
+                    if ($receiptStmt) {
+                        $receiptStmt->bind_param("i", $existingPaymentId);
+                        $receiptStmt->execute();
+                        $receiptRes = $receiptStmt->get_result();
+                        if ($receiptRes && ($receiptRow = $receiptRes->fetch_assoc())) {
+                            $existingReceipt = (string) ($receiptRow['receipt_code'] ?? '');
+                        }
+                        $receiptStmt->close();
+                    }
+                }
+
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Payment already saved.',
+                    'payment_id' => $existingPaymentId,
+                    'receipt_code' => $existingReceipt,
+                    'bill_no' => $billNo,
+                    'paid_at' => date('Y-m-d H:i:s')
+                ]);
+                $existingStmt->close();
+                exit();
+            }
+            $existingStmt->close();
+        }
+    }
+
+    $fee_id = 0;
+    $feeStmt = $conn->prepare("
+        SELECT f.id AS fee_id
+        FROM tbl_student s
+        LEFT JOIN tbl_class c ON s.class_id = c.id
+        LEFT JOIN (
+            SELECT faculty_id, department, MAX(id) AS fee_id
+            FROM tbl_fee
+            GROUP BY faculty_id, department
+        ) latest_fee ON latest_fee.faculty_id = c.faculty_id AND latest_fee.department = c.department
+        LEFT JOIN tbl_fee f ON f.id = latest_fee.fee_id
+        WHERE s.id = ?
+        LIMIT 1
+    ");
+    if ($feeStmt) {
+        $feeStmt->bind_param("i", $student_id);
+        $feeStmt->execute();
+        $feeRes = $feeStmt->get_result();
+        if ($feeRes && ($feeRow = $feeRes->fetch_assoc())) {
+            $fee_id = (int) ($feeRow['fee_id'] ?? 0);
+        }
+        $feeStmt->close();
+    }
+
     $stmt = $conn->prepare("
-        INSERT INTO tbl_payment (student_id, amount, payment_date, method, bill_no)
-        VALUES (?, ?, CURDATE(), ?, ?)
+        INSERT INTO tbl_payment (student_id, fee_id, amount, payment_date, method, bill_no)
+        VALUES (?, ?, ?, CURDATE(), ?, ?)
     ");
 
     if (!$stmt) {
@@ -101,13 +172,27 @@ if (isset($_POST['pay'])) {
         exit();
     }
 
-    $billNo = isset($_POST['bill_no']) ? trim($_POST['bill_no']) : null;
-    $stmt->bind_param("idsss", $student_id, $amount, $method, $billNo);
+    $stmt->bind_param("iidss", $student_id, $fee_id, $amount, $method, $billNo);
 
     if ($stmt->execute()) {
+        $payment_id = (int) $stmt->insert_id;
+        $receipt_code = '';
+        if ($payment_id > 0) {
+            $receipt_code = 'RCPT-' . date('YmdHis') . '-' . $payment_id;
+            $receiptStmt = $conn->prepare("INSERT INTO tbl_receipt (payment_id, receipt_code) VALUES (?, ?)");
+            if ($receiptStmt) {
+                $receiptStmt->bind_param("is", $payment_id, $receipt_code);
+                $receiptStmt->execute();
+                $receiptStmt->close();
+            }
+        }
+
         echo json_encode([
             'success' => true,
             'message' => 'Payment saved successfully.',
+            'payment_id' => $payment_id,
+            'receipt_code' => $receipt_code,
+            'bill_no' => $billNo,
             'paid_at' => date('Y-m-d H:i:s')
         ]);
     } else {
@@ -148,8 +233,8 @@ include '../Categories/header.php';
                     <i class="fa-solid fa-clock-rotate-left"></i> history
                 </button>
 
-                <button onclick="showSection('student_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
-                    <i class="fa-solid fa-user-graduate"></i> Student
+                <button onclick="showSection('about_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
+                    <i class="fa-solid fa-info-circle"></i> About
                 </button>
 
                 <button onclick="showSection('support_button', this)" class="flex items-center gap-3 p-2 text-[17px] rounded-lg hover:bg-gray-300 fw-medium">
@@ -177,11 +262,16 @@ include '../Categories/header.php';
     <div class="ml-[270px] flex-1 p-8">
 
         <!-- Home Page -->
-        <div id="home_button" class="show_hide">
+        <div id="home_button" class="show_hide mb-9">
             <!-- Welcome -->
-            <div class=" text-black bg-white rounded-2xl p-6 shadow mb-6">
-                <h1 class="text-2xl font-bold">Hi, <?php echo $data['name'] ?> 👋</h1>
-                <p class="text-gray-500 mt-1">Welcome to your student payment system</p>
+            <div class=" flex text-black bg-white rounded-2xl p-6 shadow mb-8">
+                <div>
+                <h1 class="text-4xl fw-bold">Dear! <?php echo $data['name'] ?> !</h1>
+                <p class="text-gray-500 mt-2 ml-2">Welcome to your student payment system</p>
+                </div>
+                <div class="text-blue-500 text-[50px] ml-auto">
+                    <i class="fa-solid fa-graduation-cap"></i>
+                </div>
             </div>
 
             <!-- Main Grid -->
@@ -216,26 +306,48 @@ include '../Categories/header.php';
                     <div class="flex justify-between mb-4">
                         <div>
                             <p class="text-sm text-gray-500">Total</p>
-                            <h2 class="text-xl font-bold">$<?php echo number_format($totalFee, 2); ?></h2>
+                            <h2 id="overviewTotalFee" class="text-xl font-bold">$<?php echo number_format($totalFee, 2); ?></h2>
                         </div>
 
                         <div>
                             <p class="text-sm text-gray-500">Paid</p>
-                            <h2 class="text-xl font-bold text-green-500">$<?php echo number_format($totalPaid, 2); ?></h2>
+                            <h2 id="overviewTotalPaid" class="text-xl font-bold text-green-500">$<?php echo number_format($totalPaid, 2); ?></h2>
                         </div>
 
                         <div>
                             <p class="text-sm text-gray-500">Remaining</p>
-                            <h2 class="text-xl font-bold text-red-500">$<?php echo number_format($remainingFee, 2); ?></h2>
+                            <h2 id="overviewRemainingFee" class="text-xl font-bold text-red-500">$<?php echo number_format($remainingFee, 2); ?></h2>
                         </div>
                     </div>
 
                     <!-- Progress -->
                     <div class="w-full bg-gray-200 rounded-full h-3 mb-3">
-                        <div class="bg-blue-600 h-3 rounded-full" style="width: <?php echo (int) $progressPercent; ?>%"></div>
+                        <div id="overviewProgressBar" class="bg-blue-600 h-3 rounded-full" style="width: <?php echo (int) $progressPercent; ?>%"></div>
                     </div>
 
-                    <p class="text-sm text-gray-500 mb-4"><?php echo (int) $progressPercent; ?>% completed</p>
+                    <div class="flex items-center justify-between mb-4">
+                        <p id="overviewProgressText" class="text-sm text-gray-500"><?php echo (int) $progressPercent; ?>% completed</p>
+                        <p class="text-sm text-gray-500">
+                            Updated: <?php echo $latestPayment ? htmlspecialchars($latestPayment['payment_date'] ?? '') : 'No payment yet'; ?>
+                        </p>
+                    </div>
+
+                    <div class="rounded-2xl border border-gray-100 bg-gray-50 p-4 mb-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <h4 class="font-semibold text-gray-800">Latest Payment</h4>
+                            <span class="text-xs font-semibold px-3 py-1 rounded-full bg-blue-50 text-blue-700">Live snapshot</span>
+                        </div>
+                        <?php if ($latestPayment): ?>
+                            <div class="grid gap-2 text-sm text-gray-600">
+                                <p>Date: <span id="latestPaymentDate"><?php echo htmlspecialchars($latestPayment['payment_date'] ?? ''); ?></span></p>
+                                <p>Amount: $<span id="latestPaymentAmount"><?php echo number_format((float) ($latestPayment['amount'] ?? 0), 2); ?></span></p>
+                                <p>Bill No: <span id="latestPaymentBillNo"><?php echo htmlspecialchars($latestPayment['bill_no'] ?? '-'); ?></span></p>
+                                <p>Receipt: <span id="latestPaymentReceiptCode"><?php echo htmlspecialchars($latestPayment['receipt_code'] ?? '-'); ?></span></p>
+                            </div>
+                        <?php else: ?>
+                            <p class="text-sm text-gray-500">No payments have been made yet. Your first payment will appear here automatically.</p>
+                        <?php endif; ?>
+                    </div>
 
                     <!-- Button -->
                     <button onclick="showQR(<?php echo (int) ($data['id'] ?? 0); ?>, <?php echo (float) ($data['total_fee'] ?? 0); ?>)"
@@ -256,22 +368,26 @@ include '../Categories/header.php';
                         <tr class="border-b text-gray-500">
                             <th class="py-2 text-left">Date</th>
                             <th class="text-left">Amount</th>
+                            <th class="text-left">Bill No</th>
+                            <th class="text-left">Receipt</th>
                             <th class="text-left">Status</th>
                         </tr>
                     </thead>
 
-                    <tbody>
+                    <tbody id="recentPaymentsBody">
                         <?php if (!empty($recentPayments)): ?>
                             <?php foreach ($recentPayments as $payment): ?>
                                 <tr class="border-b">
                                     <td class="py-2"><?php echo htmlspecialchars($payment['payment_date'] ?? ''); ?></td>
                                     <td>$<?php echo number_format((float) ($payment['amount'] ?? 0), 2); ?></td>
+                                    <td><?php echo htmlspecialchars($payment['bill_no'] ?? '-'); ?></td>
+                                    <td class="text-xs text-gray-500"><?php echo htmlspecialchars($payment['receipt_code'] ?? '-'); ?></td>
                                     <td class="text-green-500"><?php echo htmlspecialchars($payment['method'] ?? 'Paid'); ?></td>
                                 </tr>
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
-                                <td class="py-2 text-gray-500" colspan="3">No payments found yet.</td>
+                                <td class="py-2 text-gray-500" colspan="5">No payments found yet.</td>
                             </tr>
                         <?php endif; ?>
                     </tbody>
@@ -289,31 +405,39 @@ include '../Categories/header.php';
 
                     <p class="mt-3 text-gray-500 text-sm">Scan using Bakong / ABA</p>
 
-                    <button id="confirmPaymentBtn" onclick="confirmPayment()"
-                        class="bg-green-600 text-white mt-4 px-4 py-2 rounded-lg w-full">
-                        I Have Paid
-                    </button>
+                    <div class="mt-4 rounded-lg bg-blue-50 text-blue-700 px-4 py-3 text-sm">
+                        Waiting for payment confirmation...
+                    </div>
 
-                    <button onclick="closeQR()"
+                    <button type="button" onclick="closeQR()"
                         class="mt-2 text-red-500">
                         Cancel
                     </button>
-
                 </div>
             </div>
 
             <!-- RECEIPT -->
-            <div id="receipt" class="hidden bg-white mt-6 p-6 rounded-xl shadow text-center">
-                <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
-                <p>Payer Name: <span id="payerName">-</span></p>
-                <p>Payer Account: <span id="payerAccount">-</span></p>
-                <p>Name: <?php echo htmlspecialchars($paymentStudent['name'] ?? ''); ?></p>
-                <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id'] ?? ''); ?></p>
-                <p>Amount: $<?php echo number_format((float) ($paymentStudent['total_fee'] ?? 0), 2); ?></p>
-                <p>Date: <span id="payDate"></span></p>
+            <div id="receipt" class="hidden fixed inset-0 z-[170] flex items-center justify-center p-4">
+                <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="closeReceipt(false)"></div>
+                <div class="relative bg-white w-full max-w-md p-6 rounded-2xl shadow-2xl text-center">
+                    <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
+                    <p>Payer Name: <span id="payerName">-</span></p>
+                    <p>Payer Account: <span id="payerAccount">-</span></p>
+                    <p>Name: <?php echo htmlspecialchars($paymentStudent['name'] ?? ''); ?></p>
+                    <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id'] ?? ''); ?></p>
+                    <p>Amount: $<span id="receiptAmount">0.00</span></p>
+                    <p>Method: <span id="receiptMethod">-</span></p>
+                    <p>Bill No: <span id="receiptBillNo">-</span></p>
+                    <p>Receipt No: <span id="receiptCode">-</span></p>
+                    <p>Paid To: <span id="receiptPaidTo">-</span></p>
+                    <p>Date: <span id="payDate"></span></p>
 
-                <div class="text-green-600 font-bold mt-4">
-                    ✔ Payment Successful
+                    <div class="text-green-600 font-bold mt-4">
+                        ✔ Payment Successful
+                    </div>
+                    <button type="button" onclick="closeReceipt(true)" class="mt-4 w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700">
+                        Done
+                    </button>
                 </div>
             </div>
             <?php if ($student_id > 0 && !$paymentStudent): ?>
@@ -326,34 +450,424 @@ include '../Categories/header.php';
 
         <!-- history Page -->
         <div id="history_button" class="show_hide" style="display: none;">
-            <h1 class="fw-bold text-2xl">history Page</h1>
-            <div class="bg-white">
-                <p class="py-5">HI! This is history to show the graph or chart....</p>
+            <div class="flex items-center justify-between mb-5">
+                <h1 class="text-2xl font-bold">Payment History</h1>
+                <p class="text-sm text-gray-500"><?php echo count($recentPayments); ?> records</p>
             </div>
+
+            <?php if (!empty($recentPayments)): ?>
+                <div class="grid gap-4">
+                    <?php foreach ($recentPayments as $payment): ?>
+                        <?php
+                        $historyPayment = [
+                            'payment_date' => $payment['payment_date'] ?? '',
+                            'amount' => (float) ($payment['amount'] ?? 0),
+                            'bill_no' => $payment['bill_no'] ?? '-',
+                            'receipt_code' => $payment['receipt_code'] ?? '-',
+                            'method' => $payment['method'] ?? 'Bakong QR'
+                        ];
+                        ?>
+                        <div class="bg-white rounded-2xl shadow-md border border-gray-100 p-5 flex items-center justify-between gap-4">
+                            <div class="min-w-0">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <span class="inline-flex items-center px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-semibold">
+                                        Paid
+                                    </span>
+                                    <span class="text-sm text-gray-500"><?php echo htmlspecialchars($payment['payment_date'] ?? ''); ?></span>
+                                </div>
+                                <h3 class="text-lg font-bold text-gray-800">$<?php echo number_format((float) ($payment['amount'] ?? 0), 2); ?></h3>
+                                <p class="text-sm text-gray-500 truncate">Bill No: <?php echo htmlspecialchars($payment['bill_no'] ?? '-'); ?></p>
+                                <p class="text-sm text-gray-500 truncate">Receipt No: <?php echo htmlspecialchars($payment['receipt_code'] ?? '-'); ?></p>
+                            </div>
+                            <button
+                                type="button"
+                                class="shrink-0 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-lg shadow transition"
+                                data-payment="<?php echo htmlspecialchars(json_encode($historyPayment, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG), ENT_QUOTES, 'UTF-8'); ?>"
+                                onclick="openHistoryReceipt(this)">
+                                View
+                            </button>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php else: ?>
+                <div class="bg-white rounded-2xl shadow p-6">
+                    <p class="text-gray-500">No payment history found yet.</p>
+                </div>
+            <?php endif; ?>
         </div>
         <!-- Student page -->
-        <div id="student_button" class="show_hide" style="display: none;">
-            <div class="flex justify-between items-center mb-5">
-                <h1 class="text-2xl font-bold">Student Management</h1>
+        <div id="about_button" class="show_hide" style="display: none;">
+            <div class="flex items-center justify-between mb-5">
+                <div>
+                    <h1 class="text-2xl font-bold">Student Information</h1>
+                    <p class="text-sm text-gray-500 mt-1">Your payment details, privacy, and how to pay from one place.</p>
+                </div>
+                <div class="hidden sm:flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 text-blue-700 text-sm font-semibold">
+                    <i class="fa-solid fa-shield-halved"></i>
+                    Private & secure
+                </div>
             </div>
-            <p class="bg-white p-2 py-5 rounded-lg">This is Student Management</p>
+
+            <div class="grid gap-6 lg:grid-cols-2">
+                <div class="bg-white rounded-2xl shadow p-6 border border-gray-100">
+                    <h2 class="text-lg font-bold mb-4">Privacy Notice</h2>
+                    <div class="space-y-4 text-sm text-gray-600 leading-6">
+                        <p>
+                            Your student profile is visible only after login. We use your ID, name, email, and class information to manage school fee payments.
+                        </p>
+                        <p>
+                            Payment records and receipts are stored in your account history so you can review them later. Your data should not be shared with other users.
+                        </p>
+                        <div class="rounded-xl bg-blue-50 border border-blue-100 p-4 text-blue-900">
+                            <p class="font-semibold mb-2">Keep your account safe</p>
+                            <ul class="space-y-1 list-disc pl-5">
+                                <li>Do not share your password with anyone.</li>
+                                <li>Log out after using a public device.</li>
+                                <li>Check the receipt before leaving the payment screen.</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl shadow p-6 border border-gray-100">
+                    <h2 class="text-lg font-bold mb-4">How to Pay Fee</h2>
+                    <div class="space-y-4">
+                        <div class="flex gap-3">
+                            <div class="w-10 h-10 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center font-bold">1</div>
+                            <div>
+                                <h3 class="font-semibold text-gray-800">Open the QR payment</h3>
+                                <p class="text-sm text-gray-500">Click <span class="font-medium">Pay with QR</span> to start the payment process.</p>
+                            </div>
+                        </div>
+                        <div class="flex gap-3">
+                            <div class="w-10 h-10 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center font-bold">2</div>
+                            <div>
+                                <h3 class="font-semibold text-gray-800">Scan and pay</h3>
+                                <p class="text-sm text-gray-500">Use Bakong, ABA, or your supported banking app to scan the QR code and send the fee.</p>
+                            </div>
+                        </div>
+                        <div class="flex gap-3">
+                            <div class="w-10 h-10 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center font-bold">3</div>
+                            <div>
+                                <h3 class="font-semibold text-gray-800">Wait for confirmation</h3>
+                                <p class="text-sm text-gray-500">The system will detect the payment, close the QR modal, and show your receipt automatically.</p>
+                            </div>
+                        </div>
+
+                        <div class="mt-4 rounded-xl bg-gray-50 border border-gray-100 p-4">
+                            <p class="text-sm text-gray-600">
+                                Tip: You can always use the <span class="font-semibold">History</span> tab to view previous receipts and payment records.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div id="support_button" class="show_hide" style="display: none;">
-            <h1 class="text-2xl font-bold">Support</h1>
-            <div class="bg-white p-5 rounded-lg shadow mt-4">
-                <p class="">Seeing your payment in the class....</p>
+            <div class="flex items-center justify-between mb-5">
+                <div>
+                    <h1 class="text-2xl font-bold">Support</h1>
+                    <p class="text-sm text-gray-500 mt-1">Contact admin when you have a payment or account issue.</p>
+                </div>
+                <div class="hidden sm:flex items-center gap-2 px-4 py-2 rounded-full bg-green-50 text-green-700 text-sm font-semibold">
+                    <i class="fa-solid fa-headset"></i>
+                    Help center
+                </div>
+            </div>
+
+            <div class="grid gap-6 lg:grid-cols-3">
+                <div class="bg-white p-6 rounded-2xl shadow border border-gray-100 lg:col-span-2">
+                    <h2 class="text-lg font-bold mb-4">Common Problems</h2>
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <div class="rounded-xl border border-gray-100 p-4 bg-gray-50">
+                            <h3 class="font-semibold text-gray-800 mb-1">Payment not confirmed</h3>
+                            <p class="text-sm text-gray-500">Wait for the Bakong scan to finish. If it still does not update, contact admin with your bill number.</p>
+                        </div>
+                        <div class="rounded-xl border border-gray-100 p-4 bg-gray-50">
+                            <h3 class="font-semibold text-gray-800 mb-1">Wrong student info</h3>
+                            <p class="text-sm text-gray-500">If your name, email, or class is incorrect, ask admin to review your profile before paying again.</p>
+                        </div>
+                        <div class="rounded-xl border border-gray-100 p-4 bg-gray-50">
+                            <h3 class="font-semibold text-gray-800 mb-1">Receipt missing</h3>
+                            <p class="text-sm text-gray-500">Open the History tab and press <span class="font-medium">View</span> to check the receipt for that payment.</p>
+                        </div>
+                        <div class="rounded-xl border border-gray-100 p-4 bg-gray-50">
+                            <h3 class="font-semibold text-gray-800 mb-1">Duplicate payment</h3>
+                            <p class="text-sm text-gray-500">If you paid twice by mistake, send the bill number and receipt code to admin for review.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-2xl shadow border border-gray-100">
+                    <h2 class="text-lg font-bold mb-4">Contact Admin</h2>
+                    <div class="space-y-4 text-sm text-gray-600">
+                        <div class="rounded-xl bg-blue-50 border border-blue-100 p-4">
+                            <p class="font-semibold text-gray-800">Email</p>
+                            <p class="break-all">admin@rupppay.com</p>
+                        </div>
+                        <div class="rounded-xl bg-blue-50 border border-blue-100 p-4">
+                            <p class="font-semibold text-gray-800">Phone</p>
+                            <p>+855 12 345 678</p>
+                        </div>
+                        <div class="rounded-xl bg-blue-50 border border-blue-100 p-4">
+                            <p class="font-semibold text-gray-800">What to send</p>
+                            <p>Student ID, bill number, receipt code, and a short message about the issue.</p>
+                        </div>
+                    </div>
+
+                    <div class="mt-5 flex flex-col gap-3">
+                        <a href="mailto:admin@rupppay.com" class="text-center no-underline bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition">
+                            Email Admin
+                        </a>
+                        <a href="tel:+85512345678" class="text-center no-underline border border-gray-200 hover:bg-gray-50 text-gray-700 font-semibold py-2.5 rounded-lg transition">
+                            Call Admin
+                        </a>
+                    </div>
+                </div>
             </div>
         </div>
 
         <div id="setting_button" class="show_hide" style="display: none;">
-            <h1 class="text-2xl font-bold">Settings</h1>
-            <div class="bg-white p-5 rounded-lg shadow mt-4">
-                <p>Please set your favorite in my UI Website....</p>
+            <div class="mb-6">
+                <h1 class="text-3xl font-bold text-slate-900">Settings</h1>
+                <p class="mt-2 text-sm text-slate-500 max-w-2xl">Manage dashboard preferences, contact details, and notification behavior from one place.</p>
+            </div>
+
+            <div class="grid grid-cols-1 xl:grid-cols-1 gap-5">
+
+                <div class="xl:col-span-2 space-y-5">
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <p class="text-sm text-slate-500">Notifications</p>
+                                <h2 class="text-xl font-bold text-slate-900">Notification Preferences</h2>
+                            </div>
+                            <div class="h-12 w-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-lg">
+                                <i class="fa-solid fa-bell"></i>
+                            </div>
+                        </div>
+                        <p class="text-sm text-slate-500 mb-5">Choose how the dashboard alerts you about payments and system activity.</p>
+
+                        <div class="space-y-3">
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">Email notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Receive reports and account updates by email.</p>
+                                </div>
+                                <input type="checkbox" checked class="h-5 w-5 accent-blue-600">
+                            </label>
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">Push notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Get real-time alerts on your device.</p>
+                                </div>
+                                <input type="checkbox" class="h-5 w-5 accent-blue-600">
+                            </label>
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">SMS notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Receive critical security alerts via SMS.</p>
+                                </div>
+                                <input type="checkbox" class="h-5 w-5 accent-blue-600">
+                            </label>
+                            <label class="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 px-4 py-4">
+                                <div>
+                                    <p class="font-semibold text-slate-900">In-app notifications</p>
+                                    <p class="text-xs text-slate-500 mt-1">Show alerts inside the application.</p>
+                                </div>
+                                <input type="checkbox" checked class="h-5 w-5 accent-blue-600">
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <p class="text-sm text-slate-500">Authentication</p>
+                                    <h2 class="text-xl font-bold text-slate-900">Details</h2>
+                                </div>
+                                <div class="h-12 w-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg">
+                                    <i class="fa-solid fa-shield-halved"></i>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Email Address</label>
+                                    <input type="email" value="admin@rupppay.com" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Mobile Number</label>
+                                    <input type="text" value="+855 12 345 678" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <p class="text-sm text-slate-500">Appearance</p>
+                                    <h2 class="text-xl font-bold text-slate-900">Workspace</h2>
+                                </div>
+                                <div class="h-12 w-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center text-lg">
+                                    <i class="fa-solid fa-palette"></i>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Default language</label>
+                                    <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                        <option>English</option>
+                                        <option>Khmer</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-2">Receipt layout</label>
+                                    <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                                        <option>Centered modal</option>
+                                        <option>Right panel</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid gap-5 mt-5 lg:grid-cols-1">
+
+
+                <div class="bg-white rounded-2xl shadow border border-gray-100 p-6 lg:col-span-2">
+                    <h2 class="text-lg font-bold mb-4">Preferences</h2>
+
+                    <div class="grid gap-2 md:grid-cols-2">
+                        <div class="rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                            <div class="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 class="font-semibold text-gray-800">Payment alerts</h3>
+                                    <p class="text-sm text-gray-500 mt-1">Receive a notice when your QR payment is confirmed.</p>
+                                </div>
+                                <label class="inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" checked class="sr-only peer">
+                                    <div class="relative w-11 h-6 bg-gray-300 rounded-full peer peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-2.5"></div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                            <div class="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 class="font-semibold text-gray-800">Receipt history</h3>
+                                    <p class="text-sm text-gray-500 mt-1">Keep your paid receipts visible in the History tab.</p>
+                                </div>
+                                <label class="inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" checked class="sr-only peer">
+                                    <div class="relative w-11 h-6 bg-gray-300 rounded-full peer peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-2.5"></div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                            <div class="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 class="font-semibold text-gray-800">Privacy mode</h3>
+                                    <p class="text-sm text-gray-500 mt-1">Hide sensitive details when you are on a shared screen.</p>
+                                </div>
+                                <label class="inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" class="sr-only peer">
+                                    <div class="relative w-11 h-6 bg-gray-300 rounded-full peer peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-2.5"></div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                            <div class="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 class="font-semibold text-gray-800">Auto refresh QR</h3>
+                                    <p class="text-sm text-gray-500 mt-1">Refresh the payment code automatically if it takes too long.</p>
+                                </div>
+                                <label class="inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" checked class="sr-only peer">
+                                    <div class="relative w-11 h-6 bg-gray-300 rounded-full peer peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-2.5"></div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-6 grid gap-4 md:grid-cols-3">
+                        <div class="rounded-2xl bg-blue-50 border border-blue-100 p-4">
+                            <p class="text-xs font-semibold text-blue-700 uppercase tracking-wide">Theme</p>
+                            <p class="text-sm font-semibold text-gray-800 mt-1">Clean Blue</p>
+                        </div>
+                        <div class="rounded-2xl bg-blue-50 border border-blue-100 p-4">
+                            <p class="text-xs font-semibold text-blue-700 uppercase tracking-wide">Language</p>
+                            <p class="text-sm font-semibold text-gray-800 mt-1">English</p>
+                        </div>
+                        <div class="rounded-2xl bg-blue-50 border border-blue-100 p-4">
+                            <p class="text-xs font-semibold text-blue-700 uppercase tracking-wide">Security</p>
+                            <p class="text-sm font-semibold text-gray-800 mt-1">2-step verification</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-white mt-3 rounded-2xl border border-slate-200 shadow-sm p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <p class="text-sm text-slate-500 flex items-center gap-2">
+                                    <i class="fa-solid fa-wand-magic-sparkles text-slate-400"></i>
+                                    Action
+                                </p>
+                                <h2 class="text-xl font-bold text-slate-900">Save Settings</h2>
+                            </div>
+                            <div class="h-12 w-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-lg shadow-sm">
+                                <i class="fa-solid fa-sliders"></i>
+                            </div>
+                        </div>
+
+                        <p class="text-sm text-slate-500 mb-4 max-w-2xl">
+                            Save your dashboard preferences or reset them back to the default layout.
+                        </p>
+
+                        <div class="flex flex-wrap gap-3">
+                            <button type="button" class="px-5 py-3 rounded-xl bg-blue-500 text-white font-semibold hover:bg-blue-600 inline-flex items-center gap-2">
+                                <i class="fa-solid fa-floppy-disk"></i>
+                                Save Changes
+                            </button>
+                            <button type="button" class="px-5 py-3 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50 inline-flex items-center gap-2">
+                                <i class="fa-solid fa-rotate-left"></i>
+                                Reset
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
-
     </div>
+
+    <!-- History Receipt Modal -->
+    <div id="historyReceiptModal" class="hidden fixed inset-0 z-[170] flex items-center justify-center p-4 sm:p-6">
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="closeHistoryReceipt()"></div>
+        <div class="relative bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 text-left">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-2xl font-bold">Receipt</h2>
+                <button type="button" onclick="closeHistoryReceipt()" class="text-gray-400 hover:text-red-500 text-xl leading-none">&times;</button>
+            </div>
+            <p>Payer Name: <span id="historyReceiptPayerName"><?php echo htmlspecialchars($data['name'] ?? ''); ?></span></p>
+            <p>Payer Account: <span id="historyReceiptPayerAccount"><?php echo htmlspecialchars($data['email'] ?? ''); ?></span></p>
+            <p>Amount: $<span id="historyReceiptAmount">0.00</span></p>
+            <p>Method: <span id="historyReceiptMethod">-</span></p>
+            <p>Bill No: <span id="historyReceiptBillNo">-</span></p>
+            <p>Receipt No: <span id="historyReceiptCode">-</span></p>
+            <p>Paid To: <span id="historyReceiptPaidTo">-</span></p>
+            <p>Date: <span id="historyReceiptDate"></span></p>
+            <div class="text-green-600 font-bold mt-4">✔ Payment Successful</div>
+            <button type="button" onclick="closeHistoryReceipt()" class="mt-4 w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700">
+                Done
+            </button>
+        </div>
+    </div>
+
+</div>
 
 </div>
 <?php
@@ -439,6 +953,21 @@ $selects = "
     let autoQrOpened = false;
     let qrReady = false;
     let qrRefreshInterval = null; // Timer for QR refresh
+    let paymentCheckInterval = null;
+    let currentReceipt = {
+        amount: 0,
+        method: 'Bakong QR',
+        billNo: '',
+        receiptCode: '',
+        paidAt: '',
+        accountName: '',
+        moneyPaid: 0,
+        bankName: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay'), ENT_QUOTES); ?>',
+        bankAccount: '<?php echo htmlspecialchars(trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt'), ENT_QUOTES); ?>',
+        bankCity: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH'), ENT_QUOTES); ?>'
+    };
+    const overviewTotalFeeValue = <?php echo json_encode((float) ($data['total_fee'] ?? 0)); ?>;
+    let overviewTotalPaidValue = <?php echo json_encode((float) $totalPaid); ?>;
 
     function buildQrPlaceholder(label) {
         const safeLabel = String(label || 'Loading').replace(/[<>&"]/g, '');
@@ -475,6 +1004,55 @@ $selects = "
         confirmBtn.textContent = label;
         confirmBtn.classList.toggle('opacity-60', disabled);
         confirmBtn.classList.toggle('cursor-not-allowed', disabled);
+    }
+
+    function updateReceipt(details) {
+        const receipt = details || currentReceipt;
+        const amountEl = document.getElementById('receiptAmount');
+        const methodEl = document.getElementById('receiptMethod');
+        const billNoEl = document.getElementById('receiptBillNo');
+        const receiptCodeEl = document.getElementById('receiptCode');
+        const payDateEl = document.getElementById('payDate');
+        const paidToEl = document.getElementById('receiptPaidTo');
+        const payerNameEl = document.getElementById('payerName');
+        const payerAccountEl = document.getElementById('payerAccount');
+
+        if (payerNameEl) payerNameEl.textContent = receipt.payerName || '-';
+        if (payerAccountEl) payerAccountEl.textContent = receipt.payerAccount || '-';
+        if (amountEl) amountEl.textContent = Number(receipt.amount || currentAmount || 0).toFixed(2);
+        if (methodEl) methodEl.textContent = receipt.method || 'Bakong QR';
+        if (billNoEl) billNoEl.textContent = receipt.billNo || '-';
+        if (receiptCodeEl) receiptCodeEl.textContent = receipt.receiptCode || '-';
+        if (payDateEl) payDateEl.textContent = receipt.paidAt || '';
+        if (paidToEl) paidToEl.textContent = receipt.accountName || receipt.bankName || '';
+    }
+
+    function updatePaymentOverview(deltaAmount, paymentDetails) {
+        const amount = Number(deltaAmount || 0);
+        overviewTotalPaidValue = Math.max(0, overviewTotalPaidValue + amount);
+        const remaining = Math.max(overviewTotalFeeValue - overviewTotalPaidValue, 0);
+        const progress = overviewTotalFeeValue > 0 ? Math.min(100, Math.round((overviewTotalPaidValue / overviewTotalFeeValue) * 100)) : 0;
+
+        const totalPaidEl = document.getElementById('overviewTotalPaid');
+        const remainingEl = document.getElementById('overviewRemainingFee');
+        const progressBarEl = document.getElementById('overviewProgressBar');
+        const progressTextEl = document.getElementById('overviewProgressText');
+        const latestDateEl = document.getElementById('latestPaymentDate');
+        const latestAmountEl = document.getElementById('latestPaymentAmount');
+        const latestBillNoEl = document.getElementById('latestPaymentBillNo');
+        const latestReceiptCodeEl = document.getElementById('latestPaymentReceiptCode');
+
+        if (totalPaidEl) totalPaidEl.textContent = '$' + overviewTotalPaidValue.toFixed(2);
+        if (remainingEl) remainingEl.textContent = '$' + remaining.toFixed(2);
+        if (progressBarEl) progressBarEl.style.width = progress + '%';
+        if (progressTextEl) progressTextEl.textContent = progress + '% completed';
+
+        if (paymentDetails) {
+            if (latestDateEl) latestDateEl.textContent = paymentDetails.paidAt || paymentDetails.payment_date || '';
+            if (latestAmountEl) latestAmountEl.textContent = amount.toFixed(2);
+            if (latestBillNoEl) latestBillNoEl.textContent = paymentDetails.billNo || paymentDetails.bill_no || '-';
+            if (latestReceiptCodeEl) latestReceiptCodeEl.textContent = paymentDetails.receiptCode || paymentDetails.receipt_code || '-';
+        }
     }
 
     // View class
@@ -534,13 +1112,21 @@ $selects = "
     }
 
     function closeQR() {
-        document.getElementById('qrModal').classList.add('hidden');
+        const qrModal = document.getElementById('qrModal');
+        if (qrModal) {
+            qrModal.classList.add('hidden');
+            qrModal.style.display = 'none';
+        }
         setConfirmButtonState(false, 'I Have Paid');
 
         // Stop QR refresh when user cancels
         if (qrRefreshInterval) {
             clearInterval(qrRefreshInterval);
             qrRefreshInterval = null;
+        }
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
         }
     }
 
@@ -589,18 +1175,40 @@ $selects = "
                 return data;
             })
             .then(data => {
-                alert("Payment Successful!");
+                alertReceiptSummary(currentReceipt);
 
                 closeQR();
 
-                document.getElementById('receipt').classList.remove('hidden');
+                showReceipt();
+                document.getElementById('receipt').style.display = 'flex';
 
-                document.getElementById('payDate').innerText = data.paid_at || new Date().toLocaleString();
+                currentReceipt.amount = Number(currentAmount || 0);
+                currentReceipt.method = data.method || currentReceipt.method || 'Bakong QR';
+                currentReceipt.billNo = data.bill_no || currentBillNo || currentReceipt.billNo;
+                currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                currentReceipt.paidAt = data.paid_at || new Date().toLocaleString();
+                updateReceipt(currentReceipt);
+                prependRecentPaymentRow({
+                    payment_date: currentReceipt.paidAt,
+                    amount: currentReceipt.amount,
+                    bill_no: currentReceipt.billNo || '-',
+                    receipt_code: currentReceipt.receiptCode || '-',
+                    method: currentReceipt.method || 'Bakong QR'
+                });
+                updatePaymentOverview(currentReceipt.amount, {
+                    paidAt: currentReceipt.paidAt,
+                    billNo: currentReceipt.billNo,
+                    receiptCode: currentReceipt.receiptCode
+                });
 
                 // Stop QR refresh on successful payment
                 if (qrRefreshInterval) {
                     clearInterval(qrRefreshInterval);
                     qrRefreshInterval = null;
+                }
+                if (paymentCheckInterval) {
+                    clearInterval(paymentCheckInterval);
+                    paymentCheckInterval = null;
                 }
             })
             .catch(err => {
@@ -613,7 +1221,111 @@ $selects = "
     }
 
     function showReceipt() {
-        document.getElementById('receipt').classList.remove('hidden');
+        const receipt = document.getElementById('receipt');
+        if (receipt) {
+            receipt.classList.remove('hidden');
+            receipt.style.display = 'flex';
+        }
+    }
+
+    function closeReceipt(refreshPage) {
+        const receipt = document.getElementById('receipt');
+        if (receipt) {
+            receipt.classList.add('hidden');
+            receipt.style.display = 'none';
+        }
+        document.body.style.overflow = 'auto';
+
+        if (refreshPage) {
+            window.location.reload();
+        }
+    }
+
+    function alertReceiptSummary(receipt) {
+        alert(
+            "Payment successful\n" +
+            "Account Name: " + (receipt.accountName || receipt.bankName || '-') + "\n" +
+            "Money Paid: $" + Number(receipt.moneyPaid || receipt.amount || 0).toFixed(2) + "\n" +
+            "Receipt: " + (receipt.receiptCode || '-') + "\n" +
+            "Bill No: " + (receipt.billNo || '-') + "\n" +
+            "Account No: " + (receipt.bankAccount || '-') + "\n" +
+            "Time: " + (receipt.paidAt || '-')
+        );
+    }
+
+    function closeHistoryReceipt() {
+        const modal = document.getElementById('historyReceiptModal');
+        if (modal) {
+            modal.classList.add('hidden');
+            modal.style.display = 'none';
+        }
+        document.body.style.overflow = 'auto';
+    }
+
+    function openHistoryReceipt(button) {
+        const raw = button?.dataset?.payment || '';
+        let payment = null;
+
+        try {
+            payment = JSON.parse(raw);
+        } catch (error) {
+            payment = null;
+        }
+
+        if (!payment) {
+            return;
+        }
+
+        const modal = document.getElementById('historyReceiptModal');
+        const payerNameEl = document.getElementById('historyReceiptPayerName');
+        const payerAccountEl = document.getElementById('historyReceiptPayerAccount');
+        const amountEl = document.getElementById('historyReceiptAmount');
+        const methodEl = document.getElementById('historyReceiptMethod');
+        const billNoEl = document.getElementById('historyReceiptBillNo');
+        const receiptCodeEl = document.getElementById('historyReceiptCode');
+        const paidToEl = document.getElementById('historyReceiptPaidTo');
+        const dateEl = document.getElementById('historyReceiptDate');
+
+        if (payerNameEl) payerNameEl.textContent = <?php echo json_encode($data['name'] ?? ''); ?> || '-';
+        if (payerAccountEl) payerAccountEl.textContent = <?php echo json_encode($data['email'] ?? ''); ?> || '-';
+        if (amountEl) amountEl.textContent = Number(payment.amount || 0).toFixed(2);
+        if (methodEl) methodEl.textContent = payment.method || 'Bakong QR';
+        if (billNoEl) billNoEl.textContent = payment.bill_no || '-';
+        if (receiptCodeEl) receiptCodeEl.textContent = payment.receipt_code || '-';
+        if (paidToEl) paidToEl.textContent = '<?php echo htmlspecialchars(trim(getenv("BAKONG_MERCHANT_NAME") ?: "RUPP Pay"), ENT_QUOTES); ?>';
+        if (dateEl) dateEl.textContent = payment.payment_date || '';
+
+        if (modal) {
+            modal.classList.remove('hidden');
+            modal.style.display = 'flex';
+        }
+
+        document.body.style.overflow = 'hidden';
+    }
+
+    function prependRecentPaymentRow(payment) {
+        const tbody = document.getElementById('recentPaymentsBody');
+        if (!tbody) {
+            return;
+        }
+
+        const emptyRow = tbody.querySelector('tr td[colspan]');
+        if (emptyRow && tbody.children.length === 1) {
+            tbody.innerHTML = '';
+        }
+
+        const row = document.createElement('tr');
+        row.className = 'border-b';
+
+        row.innerHTML = `
+            <td class="py-2">${payment.payment_date || ''}</td>
+            <td>$${Number(payment.amount || 0).toFixed(2)}</td>
+            <td>${payment.bill_no || '-'}</td>
+            <td class="text-xs text-gray-500">${payment.receipt_code || '-'}</td>
+            <td class="text-green-500">${payment.method || 'Paid'}</td>
+        `;
+
+        tbody.prepend(row);
     }
 
 
@@ -626,10 +1338,10 @@ $selects = "
                     if (data.trim() === "PAID") {
                         clearInterval(interval); // បញ្ឈប់ការឆែក
                         closeQR(); // បិទ Modal QR
-                        alert(`ការបង់ប្រាក់ចំនួន $${amount} បានជោគជ័យ!`);
+                        alertReceiptSummary(currentReceipt);
 
                         // បង្ហាញវិក្កយបត្រ
-                        document.getElementById('receipt').classList.remove('hidden');
+                        showReceipt();
                         document.getElementById('payDate').innerText = new Date().toLocaleString();
 
                         // Stop QR refresh on successful payment
@@ -639,23 +1351,100 @@ $selects = "
                         }
                     }
                 });
-        }, 5000); // ឆែករៀងរាល់ ៥ វិនាទីម្តង
+        }, 50000); // ឆែករៀងរាល់ ៥ វិនាទីម្តង
+    }
+
+    function checkPaymentAuto(billNo, studentId, amount) {
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
+
+        paymentCheckInterval = setInterval(() => {
+            fetch(`../Components/check_payment.php?bill_no=${billNo}&md5=${encodeURIComponent(currentMd5 || billNo || '')}&hash=${encodeURIComponent(currentMd5 || billNo || '')}&student_id=${studentId}&amount=${amount}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (!data || data.status !== 'PAID') {
+                        return;
+                    }
+
+                    currentReceipt.amount = Number(amount || currentReceipt.amount || 0);
+                    currentReceipt.method = data.method || currentReceipt.method || 'Bakong QR';
+                    currentReceipt.billNo = billNo || currentReceipt.billNo;
+                    currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                    currentReceipt.payerName = data.payer_name || currentReceipt.payerName || '-';
+                    currentReceipt.payerAccount = data.payer_account || currentReceipt.payerAccount || '-';
+                    currentReceipt.accountName = data.account_name || data.bank_name || currentReceipt.accountName;
+                    currentReceipt.moneyPaid = Number(data.money_paid || amount || currentReceipt.moneyPaid || 0);
+                    currentReceipt.bankName = data.bank_name || currentReceipt.bankName;
+                    currentReceipt.bankAccount = data.bank_account || currentReceipt.bankAccount;
+                    currentReceipt.bankCity = data.bank_city || currentReceipt.bankCity;
+                    currentReceipt.paidAt = data.paid_at || new Date().toLocaleString();
+                    updateReceipt(currentReceipt);
+                    updatePaymentOverview(currentReceipt.moneyPaid || currentReceipt.amount || amount, {
+                        paidAt: currentReceipt.paidAt,
+                        billNo: currentReceipt.billNo,
+                        receiptCode: currentReceipt.receiptCode
+                    });
+
+                    if (paymentCheckInterval) {
+                        clearInterval(paymentCheckInterval);
+                        paymentCheckInterval = null;
+                    }
+
+                    if (qrRefreshInterval) {
+                        clearInterval(qrRefreshInterval);
+                        qrRefreshInterval = null;
+                    }
+
+                    const qrModal = document.getElementById('qrModal');
+                    qrModal.classList.add('hidden');
+                    qrModal.style.display = 'none';
+
+                    showReceipt();
+
+                    document.getElementById('payDate').innerText = currentReceipt.paidAt;
+
+                    alertReceiptSummary(currentReceipt);
+                })
+                .catch(err => {
+                    console.error("Payment check error:", err);
+                });
+        }, 5000);
     }
 
     function showQR(studentId, amount) {
+        document.getElementById('receipt').classList.add('hidden');
         currentStudent = studentId;
         currentAmount = amount;
         currentBillNo = null;
         currentMd5 = null;
         qrReady = false;
+        currentReceipt = {
+            amount: 0,
+            method: 'Bakong QR',
+            billNo: '',
+            receiptCode: '',
+            paidAt: '',
+            bankName: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay'), ENT_QUOTES); ?>',
+            bankAccount: '<?php echo htmlspecialchars(trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt'), ENT_QUOTES); ?>',
+            bankCity: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH'), ENT_QUOTES); ?>'
+        };
+        updateReceipt(currentReceipt);
 
         // Clear any existing refresh timer
         if (qrRefreshInterval) {
             clearInterval(qrRefreshInterval);
             qrRefreshInterval = null;
         }
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
 
-        document.getElementById('qrModal').classList.remove('hidden');
+        const qrModal = document.getElementById('qrModal');
+        qrModal.classList.remove('hidden');
+        qrModal.style.display = 'flex';
 
         const qrImg = document.getElementById('bakongQR');
         qrImg.src = buildQrPlaceholder("Loading QR");
@@ -682,18 +1471,18 @@ $selects = "
                 return data;
             })
             .then(data => {
-    currentBillNo = data.bill_no || null;
-    currentMd5 = data.md5 || null;
-    qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
-    qrReady = true;
-    setConfirmButtonState(false, 'I Have Paid');
+                currentBillNo = data.bill_no || null;
+                currentMd5 = data.md5 || null;
+                qrImg.src = data.qr_image || buildQrPlaceholder("QR Ready");
+                qrReady = true;
+                setConfirmButtonState(false, 'I Have Paid');
 
-    //  ADD THIS LINE — start automatic payment detection
-    checkPayment(currentBillNo, studentId, amount);
+                //  ADD THIS LINE — start automatic payment detection
+                checkPaymentAuto(currentBillNo, studentId, amount);
 
-    // Start QR refresh timer
-    startQrRefresh(studentId, amount);
-})
+                // Start QR refresh timer
+                startQrRefresh(studentId, amount);
+            })
             .catch(err => {
                 console.error("Error fetching QR:", err);
                 qrImg.src = buildQrPlaceholder("QR Failed");

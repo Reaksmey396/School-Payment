@@ -23,8 +23,8 @@ if (isset($_POST['login'])) {
             $_SESSION['is_admin'] = $row['is_admin'];
             $_SESSION['class_id'] = $row['class_id'];
 
-            if ($row['is_admin'] == 1) {
-                header('Location: ../Pages/dashboards.php');
+            if ($row['is_admin'] == 1 || $row['is_admin'] == 3) {
+                header('Location: ../Pages/Dashboards.php');
                 exit();
             } elseif ($row['is_admin'] == 2) {
 
