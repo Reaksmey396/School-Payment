@@ -1128,7 +1128,10 @@ include '../Categories/header.php';
             clearInterval(qrRefreshInterval);
             qrRefreshInterval = null;
         }
-        if (paymentCheckInterval) { clearInterval(paymentCheckInterval); paymentCheckInterval = null; }
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
     }
 
     function confirmPayment() {
@@ -1204,14 +1207,14 @@ include '../Categories/header.php';
     }
 
     function closeQRAuto() {
-    document.getElementById('qrModal').classList.add('hidden');
-document.getElementById('qrModal').style.display = 'none';
+        document.getElementById('qrModal').classList.add('hidden');
+        document.getElementById('qrModal').style.display = 'none';
 
-    if (paymentCheckInterval) {
-        clearInterval(paymentCheckInterval);
-        paymentCheckInterval = null;
+        if (paymentCheckInterval) {
+            clearInterval(paymentCheckInterval);
+            paymentCheckInterval = null;
+        }
     }
-}
 
     function checkPaymentAuto(billNo, studentId, amount) {
         if (paymentCheckInterval) {
@@ -1247,27 +1250,27 @@ document.getElementById('qrModal').style.display = 'none';
                     updateReceipt(currentReceipt);
 
                     // STOP INTERVALS
-if (paymentCheckInterval) {
-    clearInterval(paymentCheckInterval);
-    paymentCheckInterval = null;
-}
+                    if (paymentCheckInterval) {
+                        clearInterval(paymentCheckInterval);
+                        paymentCheckInterval = null;
+                    }
 
-if (qrRefreshInterval) {
-    clearInterval(qrRefreshInterval);
-    qrRefreshInterval = null;
-}
+                    if (qrRefreshInterval) {
+                        clearInterval(qrRefreshInterval);
+                        qrRefreshInterval = null;
+                    }
 
-// HIDE QR MODAL (IMPORTANT FIX)
-const qrModal = document.getElementById('qrModal');
-qrModal.classList.add('hidden');
-qrModal.style.display = 'none';
+                    // HIDE QR MODAL (IMPORTANT FIX)
+                    const qrModal = document.getElementById('qrModal');
+                    qrModal.classList.add('hidden');
+                    qrModal.style.display = 'none';
 
-// SHOW RECEIPT
-const receipt = document.getElementById('receipt');
-receipt.classList.remove('hidden');
-receipt.style.display = 'block';
+                    // SHOW RECEIPT
+                    const receipt = document.getElementById('receipt');
+                    receipt.classList.remove('hidden');
+                    receipt.style.display = 'block';
 
-document.getElementById('payDate').innerText = paidAt;
+                    document.getElementById('payDate').innerText = paidAt;
 
                     alert(
                         "Receipt: " + (currentReceipt.receiptCode || '-') + "\n" +
@@ -1421,3 +1424,56 @@ document.getElementById('payDate').innerText = paidAt;
 </script>
 
 <?php include '../Categories/footer.php'; ?>
+
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+        <div class="flex items-center justify-between mb-4">
+            <div>
+                <p class="text-sm text-slate-500">Authentication</p>
+                <h2 class="text-xl font-bold text-slate-900">Details</h2>
+            </div>
+            <div class="h-12 w-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg">
+                <i class="fa-solid fa-shield-halved"></i>
+            </div>
+        </div>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-2">Email Address</label>
+                <input type="email" value="admin@rupppay.com" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-2">Mobile Number</label>
+                <input type="text" value="+855 12 345 678" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+        <div class="flex items-center justify-between mb-4">
+            <div>
+                <p class="text-sm text-slate-500">Appearance</p>
+                <h2 class="text-xl font-bold text-slate-900">Workspace</h2>
+            </div>
+            <div class="h-12 w-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center text-lg">
+                <i class="fa-solid fa-palette"></i>
+            </div>
+        </div>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-2">Default language</label>
+                <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                    <option>English</option>
+                    <option>Khmer</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-2">Receipt layout</label>
+                <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                    <option>Centered modal</option>
+                    <option>Right panel</option>
+                </select>
+            </div>
+        </div>
+    </div>
+</div>

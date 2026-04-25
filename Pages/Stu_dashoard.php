@@ -266,8 +266,8 @@ include '../Categories/header.php';
             <!-- Welcome -->
             <div class=" flex text-black bg-white rounded-2xl p-6 shadow mb-8">
                 <div>
-                <h1 class="text-4xl fw-bold">Dear! <?php echo $data['name'] ?> !</h1>
-                <p class="text-gray-500 mt-2 ml-2">Welcome to your student payment system</p>
+                    <h1 class="text-4xl fw-bold">Dear! <span class="text-blue-500"><?php echo $data['name'] ?></span> </h1>
+                    <p class="text-gray-500 mt-2 ml-2">Welcome to your student payment system</p>
                 </div>
                 <div class="text-blue-500 text-[50px] ml-auto">
                     <i class="fa-solid fa-graduation-cap"></i>
@@ -419,12 +419,13 @@ include '../Categories/header.php';
             <!-- RECEIPT -->
             <div id="receipt" class="hidden fixed inset-0 z-[170] flex items-center justify-center p-4">
                 <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="closeReceipt(false)"></div>
-                <div class="relative bg-white w-full max-w-md p-6 rounded-2xl shadow-2xl text-center">
+                <div class="relative bg-white w-full max-w-md p-6 rounded-2xl shadow-2xl text-left">
                     <h2 class="text-2xl font-bold mb-4">🧾 Receipt</h2>
                     <p>Payer Name: <span id="payerName">-</span></p>
                     <p>Payer Account: <span id="payerAccount">-</span></p>
-                    <p>Name: <?php echo htmlspecialchars($paymentStudent['name'] ?? ''); ?></p>
-                    <p>ID: <?php echo htmlspecialchars($paymentStudent['stu_id'] ?? ''); ?></p>
+                    <p>Student Name: <?php echo htmlspecialchars($paymentStudent['name'] ?? ''); ?></p>
+                    <p>Student Email: <?php echo htmlspecialchars($paymentStudent['email'] ?? ''); ?></p>
+                    <p>Student ID: <?php echo htmlspecialchars($paymentStudent['stu_id'] ?? ''); ?></p>
                     <p>Amount: $<span id="receiptAmount">0.00</span></p>
                     <p>Method: <span id="receiptMethod">-</span></p>
                     <p>Bill No: <span id="receiptBillNo">-</span></p>
@@ -479,13 +480,22 @@ include '../Categories/header.php';
                                 <p class="text-sm text-gray-500 truncate">Bill No: <?php echo htmlspecialchars($payment['bill_no'] ?? '-'); ?></p>
                                 <p class="text-sm text-gray-500 truncate">Receipt No: <?php echo htmlspecialchars($payment['receipt_code'] ?? '-'); ?></p>
                             </div>
-                            <button
-                                type="button"
-                                class="shrink-0 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-lg shadow transition"
-                                data-payment="<?php echo htmlspecialchars(json_encode($historyPayment, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG), ENT_QUOTES, 'UTF-8'); ?>"
-                                onclick="openHistoryReceipt(this)">
-                                View
-                            </button>
+                            <div class="shrink-0 flex flex-wrap justify-end gap-2">
+                                <button
+                                    type="button"
+                                    class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-lg shadow transition"
+                                    data-payment="<?php echo htmlspecialchars(json_encode($historyPayment, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG), ENT_QUOTES, 'UTF-8'); ?>"
+                                    onclick="openHistoryReceipt(this)">
+                                    View
+                                </button>
+                                <button
+                                    type="button"
+                                    class="bg-gray-800 hover:bg-gray-700 text-white px-5 py-2 rounded-lg shadow transition"
+                                    data-payment="<?php echo htmlspecialchars(json_encode($historyPayment, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_HEX_TAG), ENT_QUOTES, 'UTF-8'); ?>"
+                                    onclick="printHistoryReceipt(this)">
+                                    Print
+                                </button>
+                            </div>
                         </div>
                     <?php endforeach; ?>
                 </div>
@@ -680,62 +690,10 @@ include '../Categories/header.php';
                             </label>
                         </div>
                     </div>
-
-                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                            <div class="flex items-center justify-between mb-4">
-                                <div>
-                                    <p class="text-sm text-slate-500">Authentication</p>
-                                    <h2 class="text-xl font-bold text-slate-900">Details</h2>
-                                </div>
-                                <div class="h-12 w-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-lg">
-                                    <i class="fa-solid fa-shield-halved"></i>
-                                </div>
-                            </div>
-                            <div class="space-y-4">
-                                <div>
-                                    <label class="block text-sm font-medium text-slate-700 mb-2">Email Address</label>
-                                    <input type="email" value="admin@rupppay.com" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
-                                </div>
-                                <div>
-                                    <label class="block text-sm font-medium text-slate-700 mb-2">Mobile Number</label>
-                                    <input type="text" value="+855 12 345 678" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                            <div class="flex items-center justify-between mb-4">
-                                <div>
-                                    <p class="text-sm text-slate-500">Appearance</p>
-                                    <h2 class="text-xl font-bold text-slate-900">Workspace</h2>
-                                </div>
-                                <div class="h-12 w-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center text-lg">
-                                    <i class="fa-solid fa-palette"></i>
-                                </div>
-                            </div>
-                            <div class="space-y-4">
-                                <div>
-                                    <label class="block text-sm font-medium text-slate-700 mb-2">Default language</label>
-                                    <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
-                                        <option>English</option>
-                                        <option>Khmer</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label class="block text-sm font-medium text-slate-700 mb-2">Receipt layout</label>
-                                    <select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500">
-                                        <option>Centered modal</option>
-                                        <option>Right panel</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
 
-            <div class="grid gap-5 mt-5 lg:grid-cols-1">
+            <div class="grid gap-5 mt-3 lg:grid-cols-1">
 
 
                 <div class="bg-white rounded-2xl shadow border border-gray-100 p-6 lg:col-span-2">
@@ -854,6 +812,8 @@ include '../Categories/header.php';
             </div>
             <p>Payer Name: <span id="historyReceiptPayerName"><?php echo htmlspecialchars($data['name'] ?? ''); ?></span></p>
             <p>Payer Account: <span id="historyReceiptPayerAccount"><?php echo htmlspecialchars($data['email'] ?? ''); ?></span></p>
+            <p>Student Name: <?php echo htmlspecialchars($data['name'] ?? ''); ?></p>
+            <p>Student Email: <?php echo htmlspecialchars($data['email'] ?? ''); ?></p>
             <p>Amount: $<span id="historyReceiptAmount">0.00</span></p>
             <p>Method: <span id="historyReceiptMethod">-</span></p>
             <p>Bill No: <span id="historyReceiptBillNo">-</span></p>
@@ -1243,6 +1203,8 @@ $selects = "
 
     function alertReceiptSummary(receipt) {
         alert(
+            "Student Name: " + <?php echo json_encode($data['name'] ?? '-'); ?> + "\n" +
+            "Student Email: " + <?php echo json_encode($data['email'] ?? '-'); ?> + "\n" +
             "Payment successful\n" +
             "Account Name: " + (receipt.accountName || receipt.bankName || '-') + "\n" +
             "Money Paid: $" + Number(receipt.moneyPaid || receipt.amount || 0).toFixed(2) + "\n" +
@@ -1262,15 +1224,18 @@ $selects = "
         document.body.style.overflow = 'auto';
     }
 
-    function openHistoryReceipt(button) {
+    function getHistoryPayment(button) {
         const raw = button?.dataset?.payment || '';
-        let payment = null;
 
         try {
-            payment = JSON.parse(raw);
+            return JSON.parse(raw);
         } catch (error) {
-            payment = null;
+            return null;
         }
+    }
+
+    function openHistoryReceipt(button) {
+        const payment = getHistoryPayment(button);
 
         if (!payment) {
             return;
@@ -1301,6 +1266,79 @@ $selects = "
         }
 
         document.body.style.overflow = 'hidden';
+    }
+
+    function escapePrintText(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function printHistoryReceipt(button) {
+        const payment = getHistoryPayment(button);
+
+        if (!payment) {
+            return;
+        }
+
+        const studentName = <?php echo json_encode($data['name'] ?? ''); ?> || '-';
+        const studentId = <?php echo json_encode($data['stu_id'] ?? ''); ?> || '-';
+        const payerAccount = <?php echo json_encode($data['email'] ?? ''); ?> || '-';
+        const paidTo = <?php echo json_encode(trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay')); ?>;
+        const amount = Number(payment.amount || 0).toFixed(2);
+
+        const printWindow = window.open('', '', 'width=800,height=650');
+        if (!printWindow) {
+            alert('Please allow popups to print the receipt.');
+            return;
+        }
+
+        printWindow.document.write(`
+            <!doctype html>
+            <html>
+            <head>
+                <title>Receipt</title>
+                <style>
+                    body { font-family: Arial, sans-serif; background: #f3f4f6; margin: 0; padding: 32px; color: #111827; }
+                    .receipt { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12); }
+                    .header { text-align: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 16px; margin-bottom: 18px; }
+                    h1 { margin: 0; font-size: 26px; }
+                    .muted { color: #6b7280; font-size: 13px; margin-top: 6px; }
+                    .row { display: flex; justify-content: space-between; gap: 18px; padding: 9px 0; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
+                    .row strong { color: #374151; }
+                    .amount { font-size: 30px; font-weight: 800; color: #166534; text-align: center; margin: 22px 0; }
+                    .success { margin-top: 18px; text-align: center; color: #16a34a; font-weight: 700; }
+                    @media print { body { background: #fff; padding: 0; } .receipt { box-shadow: none; } }
+                </style>
+            </head>
+            <body>
+                <div class="receipt">
+                    <div class="header">
+                        <h1>RUPPPAY Receipt</h1>
+                        <div class="muted">Official Payment Receipt</div>
+                    </div>
+                    <div class="amount">$${amount}</div>
+                    <div class="row"><strong>Payer Name</strong><span>${escapePrintText(studentName)}</span></div>
+                    <div class="row"><strong>Student Name</strong><span>${escapePrintText(studentName)}</span></div>
+                    <div class="row"><strong>Student Email</strong><span>${escapePrintText(payerAccount)}</span></div>
+                    <div class="row"><strong>Student ID</strong><span>${escapePrintText(studentId)}</span></div>
+                    <div class="row"><strong>Payer Account</strong><span>${escapePrintText(payerAccount)}</span></div>
+                    <div class="row"><strong>Method</strong><span>${escapePrintText(payment.method || 'Bakong QR')}</span></div>
+                    <div class="row"><strong>Bill No</strong><span>${escapePrintText(payment.bill_no || '-')}</span></div>
+                    <div class="row"><strong>Receipt No</strong><span>${escapePrintText(payment.receipt_code || '-')}</span></div>
+                    <div class="row"><strong>Paid To</strong><span>${escapePrintText(paidTo || '-')}</span></div>
+                    <div class="row"><strong>Date</strong><span>${escapePrintText(payment.payment_date || '')}</span></div>
+                    <div class="success">Payment Successful</div>
+                </div>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
     }
 
     function prependRecentPaymentRow(payment) {

@@ -361,21 +361,32 @@ include '../Categories/header.php';
     <!-- Receipt -->
     <div id="receipt" class="hidden fixed inset-0 z-[170] items-center justify-center p-4 sm:p-6">
         <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="closeReceipt(false)"></div>
-        <div class="relative bg-white rounded-2xl w-full max-w-md shadow-2xl p-5 text-left">
-            <h2 class="text-xl font-bold mb-3">Receipt</h2>
-            <p>Payer Name: <span id="payerName">-</span></p>
-            <p>Payer Account: <span id="payerAccount">-</span></p>
-            <p>Amount: $<span id="receiptAmount">0.00</span></p>
-            <p>Method: <span id="receiptMethod">-</span></p>
-            <p>Bill No: <span id="receiptBillNo">-</span></p>
-            <p>Receipt No: <span id="receiptCode">-</span></p>
-            <p>Paid To: <span id="receiptPaidTo">-</span></p>
-            <p>Date: <span id="payDate"></span></p>
-            <div class="text-green-600 font-bold mt-4">✔ Payment Successful</div>
+        <div class="relative bg-white rounded-2xl w-full max-w-md shadow-2xl p-4 text-left overflow-hidden">
+            <div id="receiptPrintArea" class="text-sm leading-5">
+                <h2 class="text-lg font-bold mb-2">Receipt</h2>
+                <div class="space-y-1.5">
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Payer Name</span><span id="payerName" class="text-right break-words">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Payer Account</span><span id="payerAccount" class="text-right break-all">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Student Name</span><span id="receiptStudentName" class="text-right break-words">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Student Email</span><span id="receiptStudentEmail" class="text-right break-all">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Amount</span><span>$<span id="receiptAmount">0.00</span></span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Method</span><span id="receiptMethod" class="text-right">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Bill No</span><span id="receiptBillNo" class="text-right break-all">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Receipt No</span><span id="receiptCode" class="text-right break-all">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Paid To</span><span id="receiptPaidTo" class="text-right break-words">-</span></p>
+                    <p class="flex justify-between gap-4"><span class="font-medium text-slate-500">Date</span><span id="payDate" class="text-right">-</span></p>
+                </div>
+                <div class="text-green-600 font-bold mt-2">Payment Successful</div>
+            </div>
 
-            <button type="button" onclick="closeReceipt(true)" class="mt-4 w-full bg-brand text-white font-semibold py-2 rounded-lg hover:bg-brandDark">
-                Done
-            </button>
+            <div class="mt-3 grid grid-cols-2 gap-3">
+                <button type="button" onclick="closeReceipt(false)" class="w-full border border-gray-300 bg-white text-gray-700 font-semibold py-2 rounded-lg hover:bg-gray-50">
+                    Close
+                </button>
+                <button type="button" onclick="printReceipt()" class="w-full bg-brand text-white font-semibold py-2 rounded-lg hover:bg-brandDark">
+                    Print
+                </button>
+            </div>
         </div>
     </div>
 </div>
@@ -509,6 +520,8 @@ include '../Categories/header.php';
 
             currentReceipt.payerName = student.name || '-';
             currentReceipt.payerAccount = student.email || '-';
+            currentReceipt.studentName = student.name || '-';
+            currentReceipt.studentEmail = student.email || '-';
             currentReceipt.amount = Number(student.total_fee || 0);
             updateReceipt(currentReceipt);
 
@@ -593,6 +606,8 @@ include '../Categories/header.php';
         billNo: '',
         receiptCode: '',
         paidAt: '',
+        studentName: '',
+        studentEmail: '',
         bankName: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_NAME') ?: 'RUPP Pay'), ENT_QUOTES); ?>',
         bankAccount: '<?php echo htmlspecialchars(trim(getenv('BAKONG_ACCOUNT_ID') ?: 'khim_reaksmey@bkrt'), ENT_QUOTES); ?>',
         bankCity: '<?php echo htmlspecialchars(trim(getenv('BAKONG_MERCHANT_CITY') ?: 'PHNOM PENH'), ENT_QUOTES); ?>'
@@ -649,9 +664,13 @@ include '../Categories/header.php';
         const paidToEl = document.getElementById('receiptPaidTo');
         const payerNameEl = document.getElementById('payerName');
         const payerAccountEl = document.getElementById('payerAccount');
+        const studentNameEl = document.getElementById('receiptStudentName');
+        const studentEmailEl = document.getElementById('receiptStudentEmail');
 
         if (payerNameEl) payerNameEl.textContent = receipt.payerName || '-';
         if (payerAccountEl) payerAccountEl.textContent = receipt.payerAccount || '-';
+        if (studentNameEl) studentNameEl.textContent = receipt.studentName || receipt.payerName || '-';
+        if (studentEmailEl) studentEmailEl.textContent = receipt.studentEmail || receipt.payerAccount || '-';
         if (amountEl) amountEl.textContent = Number(receipt.amount || currentAmount || 0).toFixed(2);
         if (methodEl) methodEl.textContent = receipt.method || 'Bakong QR';
         if (bankNameEl) bankNameEl.textContent = receipt.bankName || '';
@@ -666,11 +685,37 @@ include '../Categories/header.php';
     // Make button pay runs
     // Print reciept
     function printReceipt() {
-        var content = document.getElementById('receipt').innerHTML;
-        var myWindow = window.open('', '', 'width=800,height=600');
-        myWindow.document.write(content);
-        myWindow.document.close();
-        myWindow.print();
+        const printArea = document.getElementById('receiptPrintArea');
+        if (!printArea) return;
+
+        const printWindow = window.open('', '', 'width=800,height=650');
+        if (!printWindow) {
+            alert('Please allow popups to print the receipt.');
+            return;
+        }
+
+        printWindow.document.write(`
+            <!doctype html>
+            <html>
+            <head>
+                <title>Receipt</title>
+                <style>
+                    body { font-family: Arial, sans-serif; background: #f3f4f6; margin: 0; padding: 32px; color: #111827; }
+                    .receipt { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 14px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12); }
+                    h2 { text-align: center; margin: 0 0 18px; font-size: 26px; }
+                    p { display: flex; justify-content: space-between; gap: 18px; border-bottom: 1px solid #f3f4f6; padding: 9px 0; margin: 0; font-size: 14px; }
+                    .text-green-600 { margin-top: 18px; text-align: center; color: #16a34a; font-weight: 700; }
+                    @media print { body { background: #fff; padding: 0; } .receipt { box-shadow: none; } }
+                </style>
+            </head>
+            <body>
+                <div class="receipt">${printArea.innerHTML}</div>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
     }
 
     function closeReceipt(refreshPage) {
@@ -749,14 +794,14 @@ include '../Categories/header.php';
                 return data;
             })
             .then(data => {
-                alert("Payment Successful!");
-
                 closeQR();
-
-                document.getElementById('receipt').classList.remove('hidden');
-                document.getElementById('receipt').style.display = 'flex';
-
-                document.getElementById('payDate').innerText = data.paid_at || new Date().toLocaleString();
+                currentReceipt.amount = Number(currentAmount || currentReceipt.amount || 0);
+                currentReceipt.method = data.method || currentReceipt.method || 'Bakong QR';
+                currentReceipt.billNo = data.bill_no || currentBillNo || currentReceipt.billNo;
+                currentReceipt.receiptCode = data.receipt_code || currentReceipt.receiptCode;
+                currentReceipt.paidAt = data.paid_at || new Date().toLocaleString();
+                updateReceipt(currentReceipt);
+                showReceipt();
 
                 // Stop QR refresh on successful payment
                 if (qrRefreshInterval) {
@@ -774,7 +819,13 @@ include '../Categories/header.php';
     }
 
     function showReceipt() {
-        document.getElementById('receipt').classList.remove('hidden');
+        const receipt = document.getElementById('receipt');
+        if (!receipt) return;
+
+        receipt.classList.remove('hidden');
+        receipt.classList.add('flex');
+        receipt.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
     }
 
     function closeQRAuto() {
@@ -838,22 +889,7 @@ include '../Categories/header.php';
                     qrModal.classList.remove('flex');
                     qrModal.style.display = 'none';
 
-                    // SHOW RECEIPT
-                    const receipt = document.getElementById('receipt');
-                    receipt.classList.remove('hidden');
-                    receipt.classList.add('flex');
-                    receipt.style.display = 'flex';
-
-                    document.getElementById('payDate').innerText = paidAt;
-
-                    alert(
-                        "Account Name: " + (currentReceipt.payerName || '-') + "\n" +
-                        "Money Paid: $" + Number(currentReceipt.amount || 0).toFixed(2) + "\n" +
-                        "Receipt: " + (currentReceipt.receiptCode || '-') + "\n" +
-                        "Bank / Account: " + (currentReceipt.bankName || "") + "\n" +
-                        "Account No: " + (currentReceipt.bankAccount || "") + "\n" +
-                        "Time: " + paidAt
-                    );
+                    showReceipt();
                 })
                 .catch(err => {
                     console.error("Payment check error:", err);
